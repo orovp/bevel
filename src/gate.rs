@@ -57,9 +57,19 @@ impl GatesLock {
 
 /// Canonical hash over the parts of a spec that constitute the contract.
 ///
-/// Deliberately excluded: `status` (managed by the gate itself), and
-/// `decisions.md` / `open-questions.md` / `mockup.html`, which are logs and
-/// references. Annotating a log must not invalidate an approval.
+/// Deliberately excluded:
+///
+/// - `status`, which the gate manages itself.
+/// - `decisions.md`, `open-questions.md`, `mockup.html` — logs and references.
+///   Annotating a log must not invalidate an approval.
+/// - **the bytes of `acceptance.*`.** The design originally hashed them, which
+///   was a contradiction: implementation exists precisely to fill in the test
+///   bodies that shaping left as `todo!()`, so any real `/implement` run would
+///   reopen the gate it had just passed. Running the pipeline end to end is what
+///   surfaced it. The contract is the *named behaviours* — declared in
+///   frontmatter, and hashed there — while a body is how you prove one, which is
+///   implementation. `validate` separately enforces that every named test
+///   exists, so nothing is lost by leaving the file out.
 ///
 /// The layout is written by hand rather than delegated to a serializer so that
 /// a serde or YAML upgrade cannot silently invalidate every approval in every
@@ -93,15 +103,6 @@ pub fn spec_hash(spec: &Spec) -> Result<String> {
     h.update(b"--body--\n");
     h.update(spec.body.trim().as_bytes());
     h.update(b"\n");
-
-    for file in spec.acceptance_files()? {
-        let name = file
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        h.update(format!("--file:{name}--\n"));
-        h.update(std::fs::read(&file).with_context(|| format!("cannot read {}", file.display()))?);
-    }
 
     Ok(format!("sha256:{:x}", h.finalize()))
 }
@@ -284,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn hash_ignores_status_but_tracks_body_and_acceptance_files() {
+    fn hash_tracks_the_body_and_criteria_but_not_test_bodies() {
         let (_tmp, _p, dir) = project_with_spec(Status::Review);
         let mut spec = Spec::load(&dir).unwrap();
         let base = spec_hash(&spec).unwrap();
@@ -297,17 +298,33 @@ mod tests {
         spec.body.push_str("\nmore\n");
         assert_ne!(spec_hash(&spec).unwrap(), base);
 
-        // So is every acceptance file.
-        let mut spec = Spec::load(&dir).unwrap();
+        // Filling in a test body must NOT move the hash: that is exactly what
+        // implementation does, and hashing it made the gate reopen on every
+        // real run. The named behaviour is the contract, not its proof.
+        let spec = Spec::load(&dir).unwrap();
+        std::fs::write(
+            dir.join("acceptance.rs"),
+            "#[test]\nfn does_the_thing() { assert!(true); }\n",
+        )
+        .unwrap();
         assert_eq!(spec_hash(&spec).unwrap(), base);
-        std::fs::write(dir.join("acceptance.rs"), "// changed\n").unwrap();
-        assert_ne!(spec_hash(&spec).unwrap(), base);
 
-        // Logs are not.
-        std::fs::write(dir.join("acceptance.rs"), "// pending\n").unwrap();
-        std::fs::write(dir.join("decisions.md"), "# Q&A\n").unwrap();
-        spec = Spec::load(&dir).unwrap();
+        // Removing the file entirely also does not, since `validate` is what
+        // enforces its presence.
+        std::fs::remove_file(dir.join("acceptance.rs")).unwrap();
         assert_eq!(spec_hash(&spec).unwrap(), base);
+
+        // Logs never did.
+        std::fs::write(dir.join("decisions.md"), "# Q&A\n").unwrap();
+        let spec = Spec::load(&dir).unwrap();
+        assert_eq!(spec_hash(&spec).unwrap(), base);
+
+        // Renaming a criterion is a contract change and must move it.
+        let mut spec = Spec::load(&dir).unwrap();
+        spec.front.acceptance = vec![Criterion::A {
+            test: "does_something_else".into(),
+        }];
+        assert_ne!(spec_hash(&spec).unwrap(), base);
     }
 
     #[test]
