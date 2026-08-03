@@ -1,0 +1,7 @@
+bevel = "^0.1.0"
+specs_dir = "specs"
+inbox = "INBOX.md"
+# This repository *is* the method tree, so it hosts its own: no fetch, no
+# cache, always live. Editing a skill takes effect on the next command.
+method_path = "."
+packages = []

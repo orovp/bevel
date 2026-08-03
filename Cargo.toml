@@ -1,0 +1,36 @@
+[package]
+name = "bevel"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Spec-driven development harness for coding agents"
+license = "MIT"
+readme = "README.md"
+keywords = ["agent", "spec-driven", "claude", "bevel", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+# The package name must be unique on crates.io; the binary does not.
+# See DESIGN.md §1 "Naming".
+[[bin]]
+name = "bevel"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4.5", features = ["derive"] }
+# Only for restoring the default SIGPIPE disposition; already in the tree via chrono.
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+sha2 = "0.10"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
