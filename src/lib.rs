@@ -15,6 +15,8 @@ pub mod context;
 pub mod docs;
 pub mod gate;
 pub mod inbox;
+pub mod index;
+pub mod lifecycle;
 pub mod lockfile;
 pub mod method;
 pub mod migrate;

@@ -9,13 +9,14 @@ Execute an approved spec without reopening design decisions. If you find
 yourself wanting to decide something, that is a signal the spec is incomplete —
 log it, do not quietly decide it.
 
-## 1. The gate, first, always
+## 1. Claim the spec
 
 ```
-bevel gate <id>
+bevel start <id>
 ```
 
-Non-zero means stop and report why. Do not work around it, do not implement
+This checks the gate and takes the active slot in one step. Non-zero means stop
+and report why. Do not work around it, do not implement
 "just the safe part". The three failure modes and what each means:
 
 - **not approved** — a human has not signed off. Ask them to.
@@ -78,12 +79,20 @@ works. Address its findings or record why you disagree in `notes.md`.
 
 ## 7. Close
 
-- Every tier A and B criterion green, zero pending markers left.
-- **Tier C criteria go to the human as a checklist.** Never tick them yourself
-  — a model grading its own subjective quality always awards itself a pass.
-- Deviations in `notes.md` resolve one of three ways: fixed, or they amend the
-  spec (which breaks the hash and needs re-approval, correctly), or they become
-  new `bevel inbox add` items.
+```
+bevel close <id>
+```
 
-Then set the spec to `done` and report: what shipped, what deviated, what went
+Do not edit `status` by hand. `close` runs verification, refuses while any
+pending marker remains, refuses if the spec was amended after approval, and
+records the commit that shipped it.
+
+If the spec has tier C criteria it will refuse for you too, and print them as a
+checklist — only a human may confirm those, in a terminal. That is not an
+obstacle to work around: a model grading its own subjective quality always
+awards itself a pass. Report the checklist and ask.
+
+Before closing, resolve every deviation in `notes.md` one of three ways: fix it,
+amend the spec (which reopens the gate for re-approval, correctly), or file it
+with `bevel inbox add`. Then report what shipped, what deviated, and what went
 back to the inbox.

@@ -572,21 +572,30 @@ instruction (*"do not implement until the human approves"*) and the agent, in go
 straight past it. **An instruction is not a guardrail** (R4).
 
 1. **Approval is a hash, not a boolean.** `bevel approve 0007` computes `sha256` over the
-   canonicalized bytes of `spec.md` (body, excluding gate-managed frontmatter) **plus**
-   `acceptance.*`, and writes:
+   canonicalized bytes of `spec.md` (body, plus the criteria declared in frontmatter, excluding
+   gate-managed fields) and writes:
 
    ```toml
    [spec.0007]
    hash = "sha256:9f2c…"
    approved_at = "2026-08-02T15:40:00Z"
    approved_by = "orovp"
-   bevel_version = "0.4.2"
+   bevel_version = "0.1.0"
    ```
 
    Edit the spec later and the hash stops matching, so **the gate reopens by itself**. That
    property is what keeps this from decaying.
-   *Deliberate detail:* `decisions.md`, `open-questions.md` and `mockup.html` are **not** hashed.
-   They are logs and references; annotating them must not invalidate an approval.
+
+   *Not hashed:* `decisions.md`, `open-questions.md` and `mockup.html`, which are logs and
+   references — annotating a log must not invalidate an approval.
+
+   **Also not hashed, and this is a correction:** the *bytes* of `acceptance.*`. Earlier drafts
+   included them, which was self-contradictory — implementation exists precisely to fill in the
+   test bodies that shaping left as `todo!()`, so the first thing any real `/implement` run did
+   was reopen the gate it had just passed. Running the pipeline end to end is what surfaced it.
+   The contract is the **named behaviours**, declared in frontmatter and hashed there; a body is
+   how you *prove* one, which is implementation. `validate` separately enforces that every named
+   test exists, so nothing is lost.
 
 2. **`bevel approve` requires a TTY.** An agent's bash is non-interactive, so it cannot
    self-approve by accident.

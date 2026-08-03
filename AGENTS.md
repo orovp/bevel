@@ -12,7 +12,8 @@ approves it; implementation builds it against that spec.
 bevel status                   where things stand
 bevel shape <n>                reserve an id, scaffold specs/NNNN-slug/
 bevel validate <id>            deterministic rules; draft -> review
-bevel gate <id>                exit 0 if this spec may be implemented
+bevel start <id>                 claim an approved spec (checks the gate)
+bevel close <id>                 finish it; enforces markers and verification
 bevel verify --affected        only what changed, plus its dependents
 bevel docs <lib> --spec <id>   version-pinned docs from the lockfile
 ```

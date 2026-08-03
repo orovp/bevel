@@ -6,8 +6,8 @@ use std::process::ExitCode;
 use bevel::project::Project;
 use bevel::spec::{Spec, Status};
 use bevel::{
-    affected, config, context, docs, gate, inbox, lockfile, method, migrate, packs, paths, project,
-    spec, summary, sync, templates, validate, verify, workspace, VERSION,
+    affected, config, context, docs, gate, inbox, index, lifecycle, lockfile, method, migrate,
+    packs, paths, project, spec, summary, sync, templates, validate, verify, workspace, VERSION,
 };
 
 #[derive(Parser)]
@@ -39,8 +39,14 @@ enum Command {
     Approve(IdArgs),
     /// Exit 0 if a spec may be implemented, 1 otherwise
     Gate(IdArgs),
+    /// Claim the active slot for an approved spec
+    Start(IdArgs),
+    /// Finish a spec: enforces markers, verification and human judgement
+    Close(IdArgs),
     /// Release the active slot without losing the approval
     Pause(IdArgs),
+    /// Regenerate specs/README.md
+    Index,
     /// Fixed-size summary, independent of spec count
     Status(StatusArgs),
     /// Enumerate specs
@@ -276,7 +282,15 @@ fn run() -> Result<ExitCode> {
         Command::Validate(args) => cmd_validate(args),
         Command::Approve(args) => cmd_approve(args),
         Command::Gate(args) => cmd_gate(args),
+        Command::Start(args) => cmd_start(args),
+        Command::Close(args) => cmd_close(args),
         Command::Pause(args) => cmd_pause(args),
+        Command::Index => {
+            let p = Project::discover()?;
+            let path = index::write(&p)?;
+            println!("wrote {}", p.display_path(&path));
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Status(args) => cmd_status(args),
         Command::List(args) => cmd_list(args),
         Command::Verify(args) => cmd_verify(args),
@@ -943,6 +957,7 @@ fn cmd_shape(args: ShapeArgs) -> Result<ExitCode> {
         inbox::link(&p.inbox_path(), n, &id, &rel)?;
     }
 
+    index::write(&p)?;
     println!("created {}", p.display_path(&dir));
     println!("  next: shape it with /shape, then bevel validate {id}");
     Ok(ExitCode::SUCCESS)
@@ -1018,6 +1033,7 @@ fn cmd_approve(args: IdArgs) -> Result<ExitCode> {
     }
 
     gate::approve(&p, &mut s, false)?;
+    index::write(&p)?;
     println!("approved {} {}", s.front.id, s.front.title);
     println!("  the hash is frozen: editing the spec reopens the gate");
     Ok(ExitCode::SUCCESS)
@@ -1052,11 +1068,90 @@ fn cmd_gate(args: IdArgs) -> Result<ExitCode> {
     })
 }
 
+fn cmd_start(args: IdArgs) -> Result<ExitCode> {
+    let p = Project::discover()?;
+    let id = args.id.context("start needs a spec id")?;
+    let mut s = spec::find(&p.specs_dir(), &id)?;
+    lifecycle::start(&p, &mut s)?;
+    index::write(&p)?;
+    let total = s.tier_a_tests().len();
+    println!("implementing {} {}", s.front.id, s.front.title);
+    println!("  {total} tier A criteria to make live");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The counterpart to `approve`: the point where "am I done?" stops being an
+/// opinion. Verification runs here rather than being taken on trust.
+fn cmd_close(args: IdArgs) -> Result<ExitCode> {
+    let p = Project::discover()?;
+    let id = args.id.context("close needs a spec id")?;
+    let mut s = spec::find(&p.specs_dir(), &id)?;
+
+    let verify_ok = match run_verification(&p) {
+        Ok(ok) => ok,
+        Err(e) => {
+            eprintln!("could not verify: {e:#}");
+            false
+        }
+    };
+
+    let human = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    let blockers = lifecycle::blockers(&p, &s, verify_ok, human)?;
+    if !blockers.is_empty() {
+        eprintln!("cannot close {}:", s.front.id);
+        for b in &blockers {
+            eprintln!("  {}", b.explain(&s.front.id));
+        }
+        return Ok(ExitCode::FAILURE);
+    }
+
+    let commit = lifecycle::finish(&p, &mut s)?;
+    index::write(&p)?;
+    println!("closed {} {}", s.front.id, s.front.title);
+    match commit {
+        Some(sha) => println!("  recorded at {}", &sha[..sha.len().min(12)]),
+        None => println!("  no commit recorded (not a git repository)"),
+    }
+    println!("  unresolved deviations in notes.md belong in the inbox");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Shared by `close`, so closing proves the same thing `verify --affected` does.
+fn run_verification(p: &Project) -> Result<bool> {
+    let layers = paths::Layers::resolve()?;
+    let cfg = config::Config::load(&layers)?;
+    let m = method::resolve(Some(p), &layers, &cfg.method);
+    if !m.is_usable() {
+        bail!("{}", method::missing_help(&m, &layers));
+    }
+    let ws = workspace::detect(&p.root)?;
+    let deps = lockfile::scan(&p.root);
+    let package_paths: Vec<String> = ws.packages.iter().map(|x| x.path.clone()).collect();
+    let active = packs::active(
+        &packs::load_all(p, &layers, &m)?,
+        &p.root,
+        &package_paths,
+        &deps,
+    );
+    if active.is_empty() {
+        return Ok(true);
+    }
+    let scope = affected::compute(&p.root, &ws, None)?;
+    let scope = match scope {
+        affected::Scope::Nothing => affected::Scope::Full("closing a spec".into()),
+        other => other,
+    };
+    let results = verify::run(&p.root, &active, &ws.packages, &scope, None)?;
+    println!("{}", verify::summarise(&results));
+    Ok(results.iter().all(|r| r.ok()))
+}
+
 fn cmd_pause(args: IdArgs) -> Result<ExitCode> {
     let p = Project::discover()?;
     let id = args.id.context("pause needs a spec id")?;
     let mut s = spec::find(&p.specs_dir(), &id)?;
     gate::pause(&mut s)?;
+    index::write(&p)?;
     let pending = validate::pending_markers(&p.root, &s.front.id);
     let total = s.tier_a_tests().len();
     println!("paused {} — approval intact, resume any time", s.front.id);
