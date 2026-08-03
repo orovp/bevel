@@ -1,0 +1,11 @@
+id = "rust/tokio"
+extends = "rust"
+ecosystem = "cargo"
+# Active when the lockfile resolves tokio, not when a file exists: the lockfile
+# has already done feature and workspace resolution.
+detect_dependency = "tokio"
+
+# Verified against Context7's search API. The versioned variant
+# (/websites/rs_tokio_1_49_0) is tried first and falls back to this on 404.
+[context7]
+library = "/websites/rs_tokio"

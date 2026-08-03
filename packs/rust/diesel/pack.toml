@@ -1,0 +1,7 @@
+id = "rust/diesel"
+extends = "rust"
+ecosystem = "cargo"
+detect_dependency = "diesel"
+
+[context7]
+library = "/diesel-rs/diesel"

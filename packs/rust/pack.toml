@@ -1,0 +1,26 @@
+id = "rust"
+ecosystem = "cargo"
+detect = ["Cargo.toml"]
+extensions = ["rs"]
+# How a single package name is passed to this ecosystem's tools. `{packages}`
+# in a scoped command expands to this template applied to every affected
+# package, batched into one invocation.
+package_arg = "-p {}"
+
+[[verify]]
+name = "fmt"
+cmd = "cargo fmt --check"
+fix = "cargo fmt"
+
+[[verify]]
+name = "lint"
+cmd = "cargo clippy --all-targets -- -D warnings"
+scoped = "cargo clippy {packages} --all-targets -- -D warnings"
+
+# `cargo test` rather than `cargo nextest run`: a built-in default must work on
+# a machine that has only the toolchain. Swap it in your own pack layer
+# (~/.config/bevel/packs/rust/pack.toml) if you use nextest.
+[[verify]]
+name = "test"
+cmd = "cargo test --workspace"
+scoped = "cargo test {packages}"

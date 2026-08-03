@@ -1,0 +1,7 @@
+id = "rust/reqwest"
+extends = "rust"
+ecosystem = "cargo"
+detect_dependency = "reqwest"
+
+[context7]
+library = "/seanmonstar/reqwest"

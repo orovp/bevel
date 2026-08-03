@@ -1,0 +1,22 @@
+id = "ts"
+ecosystem = "npm"
+detect = ["package.json"]
+extensions = ["ts", "tsx", "js", "jsx", "mjs", "cjs"]
+package_arg = "-w {}"
+
+# `--if-present` throughout: a workspace that has not defined a script should
+# be skipped, not treated as a failure.
+[[verify]]
+name = "typecheck"
+cmd = "npm run typecheck --workspaces --if-present"
+scoped = "npm run typecheck {packages} --if-present"
+
+[[verify]]
+name = "lint"
+cmd = "npm run lint --workspaces --if-present"
+scoped = "npm run lint {packages} --if-present"
+
+[[verify]]
+name = "test"
+cmd = "npm test --workspaces --if-present"
+scoped = "npm test {packages} --if-present"

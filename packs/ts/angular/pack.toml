@@ -1,0 +1,14 @@
+id = "ts/angular"
+extends = "ts"
+ecosystem = "npm"
+detect_dependency = "@angular/core"
+
+[context7]
+library = "/websites/angular_dev"
+
+# Angular is the case tier B criteria exist for: much of the value is not unit
+# testable but a build that fails is still an exit code.
+[[verify]]
+name = "build"
+cmd = "npm run build --workspaces --if-present"
+scoped = "npm run build {packages} --if-present"

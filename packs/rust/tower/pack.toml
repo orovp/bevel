@@ -1,0 +1,7 @@
+id = "rust/tower"
+extends = "rust"
+ecosystem = "cargo"
+detect_dependency = "tower"
+
+[context7]
+library = "/websites/rs_tower"

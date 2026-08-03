@@ -1,0 +1,7 @@
+id = "ts/milkdown"
+extends = "ts"
+ecosystem = "npm"
+detect_dependency = "milkdown"
+
+[context7]
+library = "/websites/milkdown_dev"
