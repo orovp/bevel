@@ -1,0 +1,35 @@
+{
+  "name": "@orovp/bevel",
+  "version": "0.1.0",
+  "description": "Spec-driven development harness for coding agents",
+  "license": "MIT",
+  "bin": {
+    "bevel": "bin/bevel.js"
+  },
+  "files": [
+    "bin/bevel.js",
+    "bin/postinstall.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "linux"
+  ],
+  "optionalDependencies": {
+    "@orovp/bevel-linux-x64-gnu": "0.1.0",
+    "@orovp/bevel-linux-arm64-gnu": "0.1.0",
+    "@orovp/bevel-linux-x64-musl": "0.1.0"
+  },
+  "keywords": [
+    "agent",
+    "spec-driven",
+    "claude",
+    "bevel",
+    "cli"
+  ],
+  "scripts": {
+    "postinstall": "node bin/postinstall.js"
+  }
+}

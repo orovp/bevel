@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+      # The harness has a budget for itself. If a skill or an agent definition
+      # grows past its limit this fails, and the fix is deletion rather than a
+      # bigger limit — see DESIGN.md §13.
+      - name: context budget
+        run: |
+          cargo build
+          ./target/debug/bevel project init || true
+          ./target/debug/bevel sync
+          ./target/debug/bevel doctor --context
