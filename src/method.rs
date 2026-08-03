@@ -327,6 +327,7 @@ mod tests {
         Layers {
             config: tmp.join("cfg"),
             cache: tmp.join("cache"),
+            home: tmp.join("home"),
         }
     }
 

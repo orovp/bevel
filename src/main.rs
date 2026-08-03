@@ -51,7 +51,7 @@ enum Command {
     Status(StatusArgs),
     /// Enumerate specs
     List(ListArgs),
-    /// Render the method for the agents you use
+    /// Install the method into ~/.claude, and this project's notes if there is one
     Sync(SyncArgs),
     /// Inspect, print or download the method tree
     #[command(subcommand)]
@@ -139,10 +139,6 @@ enum MethodCmd {
 
 #[derive(Args)]
 struct SyncArgs {
-    /// Comma-separated: claude, cursor, gemini, codex, opencode. Defaults to
-    /// whichever are detected in $HOME
-    #[arg(long, value_delimiter = ',')]
-    agent: Vec<String>,
     /// Install the format-on-write, session-start and stop hooks
     #[arg(long)]
     hooks: bool,
@@ -433,10 +429,13 @@ fn append_note(path: &std::path::Path, line: &str) -> Result<()> {
 }
 
 fn cmd_sync(args: SyncArgs) -> Result<ExitCode> {
-    let p = Project::discover()?;
+    // Optional on purpose. The method installs into `$HOME` and belongs to the
+    // machine, not to any project, so `sync` has to work from anywhere — which
+    // includes a fresh machine that has no projects yet.
+    let p = Project::discover().ok();
     let layers = paths::Layers::resolve()?;
     let cfg = config::Config::load(&layers)?;
-    let mut source = method::resolve(Some(&p), &layers, &cfg.method);
+    let mut source = method::resolve(p.as_ref(), &layers, &cfg.method);
 
     // First run on a new machine: fetching here rather than erroring is the
     // difference between one command and two, and `sync` is a setup step where
@@ -450,40 +449,20 @@ fn cmd_sync(args: SyncArgs) -> Result<ExitCode> {
             cfg.context7.timeout_secs.max(20),
         )?;
         println!("  {} {}", report.git_ref, report.content_hash);
-        source = method::resolve(Some(&p), &layers, &cfg.method);
+        source = method::resolve(p.as_ref(), &layers, &cfg.method);
     }
 
-    let agents: Vec<sync::Agent> = if args.agent.is_empty() {
-        sync::detect_agents()
-    } else {
-        args.agent
-            .iter()
-            .map(|a| {
-                sync::Agent::parse(a).with_context(|| {
-                    format!(
-                        "unknown agent `{a}` (known: {})",
-                        sync::Agent::ALL
-                            .iter()
-                            .map(|x| x.id())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                })
-            })
-            .collect::<Result<_>>()?
-    };
-
     println!("method: {}", source.origin);
-    println!(
-        "agents: {}",
-        agents
-            .iter()
-            .map(|a| format!("{} (tier {})", a.id(), a.tier()))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    for action in sync::sync(&p, &layers, &source, &agents, args.hooks)? {
+    for action in sync::sync(p.as_ref(), &layers, &source, args.hooks)? {
         println!("{action}");
+    }
+    // Say which half ran. Silence here reads as "everything is installed", and
+    // the project files really are missing.
+    if p.is_none() {
+        println!(
+            "\nno project here, so only the machine-wide method was installed.\n  \
+             run `bevel project init` inside a repository for its CLAUDE.md"
+        );
     }
     Ok(ExitCode::SUCCESS)
 }

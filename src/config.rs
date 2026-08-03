@@ -159,6 +159,7 @@ mod tests {
         let layers = Layers {
             config: tmp.path().join("nope"),
             cache: tmp.path().join("cache"),
+            home: tmp.path().join("home"),
         };
         let cfg = Config::load(&layers).unwrap();
         assert_eq!(cfg.context7.base_url, "https://context7.com/api/v1");
@@ -174,6 +175,7 @@ mod tests {
         let layers = Layers {
             config: tmp.path().to_path_buf(),
             cache: tmp.path().join("cache"),
+            home: tmp.path().join("home"),
         };
         let cfg = Config::load(&layers).unwrap();
         assert_eq!(cfg.context7.tokens, 999);

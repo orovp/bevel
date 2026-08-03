@@ -298,6 +298,7 @@ mod tests {
         let layers = Layers {
             config: tmp.path().join("cfg"),
             cache: tmp.path().join("cache"),
+            home: tmp.path().join("home"),
         };
         let method = crate::method::Source {
             kind: crate::method::Kind::Local,

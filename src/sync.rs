@@ -1,13 +1,14 @@
-//! Rendering the method into agent-specific locations (DESIGN.md §9).
+//! Installing the method where Claude Code reads it (DESIGN.md §9).
 //!
-//! One source, projected outward. Claude Code is tier 1 — skills, subagents and
-//! hooks. Everything else is tier 0: `AGENTS.md` plus the artifacts on disk plus
-//! this binary, which is enough to run the same pipeline because every phase
-//! writes a file and the next one reads it.
+//! Claude Code is the only target. Other agents were supported here once, in
+//! the abstract, before any of them had been used against this pipeline for
+//! real — which is how you end up maintaining five renderers that are each
+//! wrong in a way nobody has noticed. When a second agent earns its place, the
+//! split it needs will be known rather than guessed.
 //!
-//! Deliberately absent: copies of the skills in each agent's own prompt format.
-//! `bevel method shape` prints them from the one method tree instead, so there
-//! is nothing to drift.
+//! What survives that cut is the part that was never agent-specific: the method
+//! has one source on disk, and `bevel method shape` prints it. Nothing is
+//! transliterated into anyone's prompt format, so there is nothing to drift.
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
@@ -41,79 +42,6 @@ const DENY_RULE: &str = "Bash(bevel approve*)";
 const LEGACY_DENY_RULE: &str = "Bash(harness approve*)";
 const COMMAND_PREFIXES: [&str; 2] = ["bevel ", "harness "];
 
-// ------------------------------------------------------------------ agents
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Agent {
-    Claude,
-    Cursor,
-    Gemini,
-    Codex,
-    Opencode,
-}
-
-impl Agent {
-    pub const ALL: [Agent; 5] = [
-        Agent::Claude,
-        Agent::Cursor,
-        Agent::Gemini,
-        Agent::Codex,
-        Agent::Opencode,
-    ];
-
-    pub fn id(self) -> &'static str {
-        match self {
-            Agent::Claude => "claude",
-            Agent::Cursor => "cursor",
-            Agent::Gemini => "gemini",
-            Agent::Codex => "codex",
-            Agent::Opencode => "opencode",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|a| a.id() == s)
-    }
-
-    /// Tier 1 gets subagents and hooks; tier 0 runs the same pipeline through
-    /// `AGENTS.md` and the CLI, losing context isolation but not function.
-    pub fn tier(self) -> u8 {
-        match self {
-            Agent::Claude => 1,
-            _ => 0,
-        }
-    }
-
-    /// A home-directory marker suggesting this agent is installed. Detection is
-    /// a convenience, never a requirement — `--agent` overrides it.
-    fn home_marker(self) -> &'static str {
-        match self {
-            Agent::Claude => ".claude",
-            Agent::Cursor => ".cursor",
-            Agent::Gemini => ".gemini",
-            Agent::Codex => ".codex",
-            Agent::Opencode => ".config/opencode",
-        }
-    }
-
-    pub fn installed(self) -> bool {
-        std::env::var_os("HOME")
-            .map(|h| Path::new(&h).join(self.home_marker()).exists())
-            .unwrap_or(false)
-    }
-}
-
-pub fn detect_agents() -> Vec<Agent> {
-    let found: Vec<Agent> = Agent::ALL.into_iter().filter(|a| a.installed()).collect();
-    if found.is_empty() {
-        // Claude Code is the tier-1 target; rendering for it is the useful
-        // default when nothing can be detected.
-        vec![Agent::Claude]
-    } else {
-        found
-    }
-}
-
 // ------------------------------------------------------------------ actions
 
 #[derive(Debug, PartialEq, Eq)]
@@ -131,102 +59,80 @@ impl std::fmt::Display for Action {
     }
 }
 
+/// Install the method.
+///
+/// `project` is optional because half of this does not belong to a project.
+/// What lands in `~/.claude` is the same text on the machine whatever directory
+/// you are standing in, so requiring a project first would be a made-up
+/// dependency — and one that bites exactly at the moment a new machine has no
+/// projects yet.
 pub fn sync(
-    project: &Project,
+    project: Option<&Project>,
     layers: &Layers,
     source: &Source,
-    agents: &[Agent],
     hooks: bool,
 ) -> Result<Vec<Action>> {
     if !source.is_usable() {
         bail!("{}", crate::method::missing_help(source, layers));
     }
-    // Universal first: this is the portability layer, not a Claude fallback.
-    let mut actions = vec![write_if_absent(
-        &project.root.join("AGENTS.md"),
-        AGENTS_MD,
-        project,
-    )?];
-
-    for agent in agents {
-        match agent {
-            Agent::Claude => actions.extend(sync_claude(project, layers, source, hooks)?),
-            Agent::Cursor => actions.push(sync_cursor(project)?),
-            Agent::Gemini => actions.push(write_if_absent(
-                &project.root.join("GEMINI.md"),
-                &pointer_stub(),
-                project,
-            )?),
-            // Both read AGENTS.md natively; anything further would be a second
-            // copy of instructions that already exist.
-            Agent::Codex | Agent::Opencode => {}
-        }
-    }
+    // The machine's half first: it is the half that always applies.
+    let mut actions = sync_machine(project, layers, source)?;
+    actions.extend(sync_project(project, layers, hooks)?);
     Ok(actions)
 }
 
-fn sync_claude(
-    project: &Project,
+/// Skills and subagents, installed once per machine.
+///
+/// The split is by lifetime, not by feature. This is the method, and the method
+/// is the same text whichever project you are standing in — a copy per project
+/// would be N copies of one file, free to drift.
+fn sync_machine(
+    project: Option<&Project>,
     layers: &Layers,
     source: &Source,
-    hooks: bool,
 ) -> Result<Vec<Action>> {
     let mut actions = Vec::new();
 
     for name in SKILLS {
         let body = skill_body(layers, source, name)
             .with_context(|| format!("skill `{name}` is missing from the method tree"))?;
-        let dest = project
-            .root
-            .join(".claude/skills")
-            .join(name)
-            .join("SKILL.md");
-        actions.push(write_generated(&dest, &body, project)?);
+        let dest = layers.claude_skills().join(name).join("SKILL.md");
+        actions.push(write_generated(&dest, &body, project, layers)?);
     }
 
     for name in AGENT_DEFS {
         let body = agent_body(layers, source, name)
             .with_context(|| format!("subagent `{name}` is missing from the method tree"))?;
-        let dest = project
-            .root
-            .join(".claude/agents")
-            .join(format!("{name}.md"));
-        actions.push(write_generated(&dest, &body, project)?);
+        let dest = layers.claude_agents().join(format!("{name}.md"));
+        actions.push(write_generated(&dest, &body, project, layers)?);
     }
 
-    actions.push(sync_settings(project, hooks)?);
-    actions.push(write_if_absent(
-        &project.root.join("CLAUDE.md"),
-        &pointer_stub(),
-        project,
-    )?);
     Ok(actions)
 }
 
-/// Cursor reads project rules from `.cursor/rules/*.mdc`. One always-applied
-/// rule pointing at `AGENTS.md` is the whole integration — duplicating the
-/// skills here is exactly the drift this design forbids.
-fn sync_cursor(project: &Project) -> Result<Action> {
-    write_generated(
-        &project.root.join(".cursor/rules/bevel.mdc"),
-        CURSOR_RULE,
-        project,
-    )
-}
+/// What a project needs said about *itself*, which is nothing at all when there
+/// is no project to say it about.
+fn sync_project(project: Option<&Project>, layers: &Layers, hooks: bool) -> Result<Vec<Action>> {
+    let Some(p) = project else {
+        return Ok(Vec::new());
+    };
 
-const CURSOR_RULE: &str = "---\n\
-     description: Spec-driven workflow enforced by the harness CLI\n\
-     alwaysApply: true\n\
-     ---\n\
-     \n\
-     Follow [AGENTS.md](../../AGENTS.md).\n\
-     \n\
-     Before implementing anything from `specs/`, run `bevel gate <id>`. A\n\
-     non-zero exit means a human has not approved it, and that is not\n\
-     something to work around.\n\
-     \n\
-     Print the full instructions with `bevel method shape` or\n\
-     `bevel method implement`.\n";
+    // The body, in the file Claude Code already loads every turn. One file
+    // rather than a file plus a pointer to it: with a single agent to serve,
+    // the indirection bought nothing and cost a hop.
+    let mut actions = vec![write_if_absent(
+        &p.root.join("CLAUDE.md"),
+        CLAUDE_MD,
+        project,
+        layers,
+    )?];
+
+    // Project-scoped on purpose, unlike everything in sync_machine: these hooks
+    // shell out to `bevel`, and at user level they would fire in every
+    // repository on the machine, including those with no project to find.
+    actions.push(sync_settings(p, layers, hooks)?);
+    Ok(actions)
+}
 
 /// A skill body: user layer first, then the method tree.
 pub fn skill_body(layers: &Layers, source: &Source, name: &str) -> Option<String> {
@@ -257,8 +163,8 @@ pub fn agent_body(layers: &Layers, source: &Source, name: &str) -> Option<String
     ])
 }
 
-/// Either kind, for `bevel method <name>` — which is how a tier-0 agent reads
-/// the instructions without a copy existing in its own prompt format.
+/// Either kind, for `bevel method <name>` — which is how the instructions get
+/// read without a copy existing in anyone's own prompt format.
 pub fn method_body(layers: &Layers, source: &Source, name: &str) -> Option<String> {
     skill_body(layers, source, name).or_else(|| agent_body(layers, source, name))
 }
@@ -273,9 +179,27 @@ fn read_first(paths: &[PathBuf]) -> Option<String> {
 
 // ------------------------------------------------------------------ writing
 
+/// Paths as the user recognises them: relative inside the project, `~`-prefixed
+/// outside it. Sync now writes to both, and an absolute path in the middle of
+/// the output reads like a mistake even when it is not.
+fn display(project: Option<&Project>, layers: &Layers, path: &Path) -> String {
+    if let Some(rel) = project.and_then(|p| path.strip_prefix(&p.root).ok()) {
+        return rel.display().to_string();
+    }
+    match path.strip_prefix(&layers.home) {
+        Ok(rel) => format!("~/{}", rel.display()),
+        Err(_) => path.display().to_string(),
+    }
+}
+
 /// Write a file this tool owns, refusing to clobber anything hand-edited.
-fn write_generated(path: &Path, body: &str, project: &Project) -> Result<Action> {
-    let rel = project.display_path(path);
+fn write_generated(
+    path: &Path,
+    body: &str,
+    project: Option<&Project>,
+    layers: &Layers,
+) -> Result<Action> {
+    let rel = display(project, layers, path);
     if let Ok(existing) = std::fs::read_to_string(path) {
         if !existing.contains(MARKER) {
             return Ok(Action::Skipped(rel, "hand-edited"));
@@ -293,10 +217,18 @@ fn write_generated(path: &Path, body: &str, project: &Project) -> Result<Action>
     Ok(Action::Wrote(rel))
 }
 
-fn write_if_absent(path: &Path, body: &str, project: &Project) -> Result<Action> {
-    let rel = project.display_path(path);
+fn write_if_absent(
+    path: &Path,
+    body: &str,
+    project: Option<&Project>,
+    layers: &Layers,
+) -> Result<Action> {
+    let rel = display(project, layers, path);
     if path.exists() {
         return Ok(Action::Skipped(rel, "already present"));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
     std::fs::write(path, body).with_context(|| format!("cannot write {}", path.display()))?;
     Ok(Action::Wrote(rel))
@@ -307,9 +239,9 @@ fn write_if_absent(path: &Path, body: &str, project: &Project) -> Result<Action>
 ///
 /// A merge rather than a write: this file is the user's, and clobbering their
 /// permissions to install one rule would be a bad trade.
-fn sync_settings(project: &Project, hooks: bool) -> Result<Action> {
+fn sync_settings(project: &Project, layers: &Layers, hooks: bool) -> Result<Action> {
     let path = project.root.join(".claude/settings.json");
-    let rel = project.display_path(&path);
+    let rel = display(Some(project), layers, &path);
 
     let mut root: Value = match std::fs::read_to_string(&path) {
         Ok(text) if !text.trim().is_empty() => serde_json::from_str(&text)
@@ -416,17 +348,12 @@ fn is_ours(entry: &Value) -> bool {
         .unwrap_or(false)
 }
 
-fn pointer_stub() -> String {
-    "See [AGENTS.md](AGENTS.md).\n\
-     \n\
-     One instruction lives in one place; this file is a pointer so the two\n\
-     cannot drift apart.\n"
-        .to_string()
-}
-
-/// The portability layer. Everything an agent needs in order to run the
-/// pipeline without a single agent-specific file existing.
-const AGENTS_MD: &str = r#"# Agent notes
+/// What this project needs said about itself. The pipeline is here rather than
+/// in the skills because it is the part a reader needs before invoking one.
+///
+/// Loaded every turn, so it is kept under 50 lines and `bevel doctor` says so
+/// when it is not.
+const CLAUDE_MD: &str = r#"# Agent notes
 
 Non-obvious things only. Anything derivable from the file tree does not belong
 here, and nothing here is repeated in another file.
@@ -455,8 +382,8 @@ bevel method shape
 bevel method implement
 ```
 
-Those print the same text a `/shape` or `/implement` command would load, so the
-pipeline works in any agent whether or not it has slash commands.
+Those print the same text `/shape` and `/implement` load, from the one method
+tree, so reading them can never disagree with running them.
 
 ## Gotchas
 
@@ -517,6 +444,8 @@ mod tests {
         let layers = Layers {
             config: tmp.path().join("cfg"),
             cache: tmp.path().join("cache"),
+            // Never the real $HOME: these tests write into it.
+            home: tmp.path().join("home"),
         };
         // This repository is itself a method tree, which is what ships.
         let source = Source {
@@ -528,40 +457,82 @@ mod tests {
     }
 
     #[test]
-    fn claude_gets_skills_agents_and_a_deny_rule_and_sync_is_idempotent() {
+    fn a_full_sync_writes_everything_once_and_is_idempotent() {
         let (_t, p, l, m) = setup();
-        let first = sync(&p, &l, &m, &[Agent::Claude], false).unwrap();
+        let first = sync(Some(&p), &l, &m, false).unwrap();
         assert!(
             first.iter().all(|a| matches!(a, Action::Wrote(_))),
             "{first:?}"
         );
-        assert!(p.root.join(".claude/skills/shape/SKILL.md").is_file());
-        assert!(p.root.join(".claude/agents/spec-critic.md").is_file());
+        let skill = l.claude_skills().join("shape/SKILL.md");
+        assert!(skill.is_file());
+        assert!(l.claude_agents().join("spec-critic.md").is_file());
 
-        let text = std::fs::read_to_string(p.root.join(".claude/skills/shape/SKILL.md")).unwrap();
+        let text = std::fs::read_to_string(&skill).unwrap();
         assert!(text.starts_with("---\nname: shape"));
 
-        let second = sync(&p, &l, &m, &[Agent::Claude], false).unwrap();
+        let second = sync(Some(&p), &l, &m, false).unwrap();
         assert!(
             second.iter().all(|a| matches!(a, Action::Skipped(_, _))),
             "{second:?}"
         );
     }
 
+    /// Claude Code reads personal skills from `~/.claude/skills` and nowhere
+    /// else. A skill installed anywhere else looks installed and never loads,
+    /// which is the one failure mode with no symptom.
     #[test]
-    fn tier_zero_agents_get_only_agents_md() {
+    fn the_method_installs_where_claude_code_reads_it() {
         let (_t, p, l, m) = setup();
-        sync(&p, &l, &m, &[Agent::Codex, Agent::Opencode], false).unwrap();
-        assert!(p.root.join("AGENTS.md").is_file());
-        assert!(!p.root.join(".claude").exists());
-        assert!(!p.root.join(".cursor").exists());
+        sync(Some(&p), &l, &m, true).unwrap();
+        assert!(l.home.join(".claude/skills/implement/SKILL.md").is_file());
+        assert!(l.home.join(".claude/agents/domain-scout.md").is_file());
+        // Nothing per-project, and nothing in the directory the standard
+        // proposes but Claude Code does not read.
+        assert!(!p.root.join(".claude/skills").exists());
+        assert!(!p.root.join(".claude/agents").exists());
+        assert!(!l.home.join(".agents").exists());
+        // What is genuinely project-scoped stays behind.
+        assert!(p.root.join("CLAUDE.md").is_file());
+        assert!(p.root.join(".claude/settings.json").is_file());
     }
 
+    /// What lives in `$HOME` is the machine's, not a project's. Requiring a
+    /// project first would be a dependency that does not exist — and it would
+    /// bite on a fresh machine, where there is nothing to init yet.
     #[test]
-    fn agents_md_carries_the_runnable_pipeline_and_stays_in_budget() {
+    fn the_method_installs_with_no_project_at_all() {
+        let (_t, _p, l, m) = setup();
+        let actions = sync(None, &l, &m, true).unwrap();
+        assert!(l.claude_skills().join("shape/SKILL.md").is_file());
+        assert!(l.claude_agents().join("spec-critic.md").is_file());
+        // Every path reported has to be one the user can find without a root
+        // to be relative to.
+        for a in &actions {
+            let Action::Wrote(p) = a else { continue };
+            assert!(p.starts_with("~/"), "{p}");
+        }
+    }
+
+    /// The project half must not be invented from thin air when there is no
+    /// project: there is no directory it could correctly be written to.
+    #[test]
+    fn without_a_project_nothing_project_scoped_is_written() {
+        let (t, _p, l, m) = setup();
+        sync(None, &l, &m, true).unwrap();
+        for stray in ["CLAUDE.md", ".claude/settings.json"] {
+            assert!(!l.home.join(stray).exists(), "{stray} in $HOME");
+            assert!(!t.path().join(stray).exists(), "{stray} outside a project");
+        }
+    }
+
+    /// CLAUDE.md is loaded every turn, so it carries the pipeline itself and
+    /// pays for it in a budget `bevel doctor` enforces.
+    #[test]
+    fn claude_md_carries_the_runnable_pipeline_and_stays_in_budget() {
         let (_t, p, l, m) = setup();
-        sync(&p, &l, &m, &[Agent::Codex], false).unwrap();
-        let text = std::fs::read_to_string(p.root.join("AGENTS.md")).unwrap();
+        sync(Some(&p), &l, &m, false).unwrap();
+        let text = std::fs::read_to_string(p.root.join("CLAUDE.md")).unwrap();
         assert!(text.contains("bevel gate <id>"));
         assert!(text.contains("bevel method shape"));
         // The reason approve is absent has to be stated, or an agent will try.
@@ -570,25 +541,14 @@ mod tests {
     }
 
     #[test]
-    fn cursor_gets_an_always_applied_rule_pointing_at_agents_md() {
-        let (_t, p, l, m) = setup();
-        sync(&p, &l, &m, &[Agent::Cursor], false).unwrap();
-        let text = std::fs::read_to_string(p.root.join(".cursor/rules/bevel.mdc")).unwrap();
-        assert!(text.starts_with("---\n"));
-        assert!(text.contains("alwaysApply: true"));
-        assert!(text.contains("AGENTS.md"));
-        assert!(text.contains("bevel gate"));
-    }
-
-    #[test]
     fn hooks_are_installed_only_when_asked_and_never_duplicate() {
         let (_t, p, l, m) = setup();
-        sync(&p, &l, &m, &[Agent::Claude], false).unwrap();
+        sync(Some(&p), &l, &m, false).unwrap();
         let path = p.root.join(".claude/settings.json");
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(v.get("hooks").is_none());
 
-        sync(&p, &l, &m, &[Agent::Claude], true).unwrap();
+        sync(Some(&p), &l, &m, true).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let post = v["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(post.len(), 1);
@@ -600,7 +560,7 @@ mod tests {
         );
 
         // Running twice must not stack duplicates.
-        sync(&p, &l, &m, &[Agent::Claude], true).unwrap();
+        sync(Some(&p), &l, &m, true).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["hooks"]["PostToolUse"].as_array().unwrap().len(), 1);
     }
@@ -618,7 +578,7 @@ mod tests {
         )
         .unwrap();
 
-        sync(&p, &l, &m, &[Agent::Claude], true).unwrap();
+        sync(Some(&p), &l, &m, true).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
 
         let deny = v["permissions"]["deny"].as_array().unwrap();
@@ -641,7 +601,7 @@ mod tests {
         )
         .unwrap();
 
-        sync(&p, &l, &m, &[Agent::Claude], true).unwrap();
+        sync(Some(&p), &l, &m, true).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let stop = v["hooks"]["Stop"].as_array().unwrap();
         assert_eq!(stop.len(), 2);
@@ -661,9 +621,7 @@ mod tests {
             root: _t.path().join("nowhere"),
             origin: "test".into(),
         };
-        let err = sync(&p, &l, &empty, &[Agent::Claude], false)
-            .unwrap_err()
-            .to_string();
+        let err = sync(Some(&p), &l, &empty, false).unwrap_err().to_string();
         assert!(err.contains("not available"), "{err}");
     }
 
@@ -688,24 +646,14 @@ mod tests {
     #[test]
     fn a_hand_edited_generated_file_is_never_clobbered() {
         let (_t, p, l, m) = setup();
-        let dest = p.root.join(".claude/skills/shape/SKILL.md");
+        let dest = l.claude_skills().join("shape/SKILL.md");
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
         std::fs::write(&dest, "---\nname: shape\n---\nmine\n").unwrap();
 
-        sync(&p, &l, &m, &[Agent::Claude], false).unwrap();
+        sync(Some(&p), &l, &m, false).unwrap();
         assert_eq!(
             std::fs::read_to_string(&dest).unwrap(),
             "---\nname: shape\n---\nmine\n"
         );
-    }
-
-    #[test]
-    fn agent_ids_round_trip_and_tiers_are_assigned() {
-        for a in Agent::ALL {
-            assert_eq!(Agent::parse(a.id()), Some(a));
-        }
-        assert!(Agent::parse("emacs").is_none());
-        assert_eq!(Agent::Claude.tier(), 1);
-        assert_eq!(Agent::Codex.tier(), 0);
     }
 }
