@@ -515,7 +515,7 @@ fn cmd_method(cmd: MethodCmd) -> Result<ExitCode> {
             }
             println!();
             for (label, path, which) in sync::method_sources(&layers, &source) {
-                println!("  {label:<22} {which:<8} {}", path.display());
+                println!("  {label:<27} {which:<8} {}", path.display());
             }
             if !source.is_usable() {
                 eprintln!("\n{}", method::missing_help(&source, &layers));
@@ -859,7 +859,7 @@ fn cmd_doctor(args: DoctorArgs) -> Result<ExitCode> {
     // "Why is my skill edit not taking effect?" is an afternoon without this.
     println!("\nskills");
     for (name, path, which) in sync::method_sources(&layers, &m) {
-        println!("  {name:<22} {which:<8} {}", path.display());
+        println!("  {name:<27} {which:<8} {}", path.display());
     }
 
     // A gate that silently stopped matching is worse than one that never existed.

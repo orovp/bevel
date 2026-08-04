@@ -20,7 +20,15 @@ use crate::project::Project;
 
 /// Method file names. The bodies live in the method tree on disk, not here:
 /// editing a skill must never require a release (DESIGN.md §2).
-pub const SKILLS: [&str; 2] = ["shape", "implement"];
+/// `shape` and `implement` are the lifecycle; the `*-architecture` ones are
+/// conventions skills, loaded by the model when the work matches them rather
+/// than by a step of the loop. Both kinds install the same way.
+pub const SKILLS: [&str; 4] = [
+    "shape",
+    "implement",
+    "rust-architecture",
+    "angular-architecture",
+];
 
 /// Subagents exist for context isolation: three independent searches that must
 /// not pollute the context where the interview happens, and two reviewers that
@@ -635,7 +643,7 @@ mod tests {
             .unwrap()
             .contains("name: spec-critic"));
         assert!(method_body(&l, &m, "nope").is_none());
-        assert_eq!(method_names().len(), 9);
+        assert_eq!(method_names().len(), 11);
 
         let src = l.user_method().join("skills/shape/SKILL.md");
         std::fs::create_dir_all(src.parent().unwrap()).unwrap();

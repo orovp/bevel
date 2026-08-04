@@ -5,5 +5,4 @@ precise here, that is what shaping is for.
 
 Add with `bevel inbox add "..."`, shape with `bevel shape <n>`.
 
-- Crear skill para el desarrollo y arquitectura de software sobre código Rust
-- Crear skill para el desarrollo y arquitectura de software sobre código Angular
+- Intentar encontrar donde seria interesante que el agente genere html en lugar de markdown

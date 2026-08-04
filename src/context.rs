@@ -111,7 +111,16 @@ pub fn audit(project: &Project, layers: &Layers, source: &method::Source) -> Res
 
     // The method, from whichever layer actually resolves.
     for (label, path, _which) in sync::method_sources(layers, source) {
-        let limit = if label.starts_with("skill/") { 120 } else { 60 };
+        // A lifecycle skill is read on every pass of the loop, so it pays for
+        // its length constantly. A conventions skill is read only when the work
+        // matches it, and its length is set by the surface it covers rather
+        // than by what the loop needs: twice the lifecycle budget, and still a
+        // number that bites — same file kind, different limit.
+        let limit = match label.as_str() {
+            "skill/shape" | "skill/implement" => 120,
+            l if l.starts_with("skill/") => 240,
+            _ => 60,
+        };
         let load = if label.starts_with("skill/") {
             Load::OnInvocation
         } else {
