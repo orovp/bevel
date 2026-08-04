@@ -23,12 +23,30 @@ use crate::project::Project;
 /// `shape` and `implement` are the lifecycle; the `*-architecture` ones are
 /// conventions skills, loaded by the model when the work matches them rather
 /// than by a step of the loop. Both kinds install the same way.
-pub const SKILLS: [&str; 4] = [
+///
+/// `skill-creator` is vendored from <https://github.com/anthropics/skills> under
+/// the Apache License 2.0, and is the reason a skill is a directory rather than
+/// a file: it ships scripts and reference documents its SKILL.md calls out to.
+pub const SKILLS: [&str; 5] = [
     "shape",
     "implement",
     "rust-architecture",
     "angular-architecture",
+    "skill-creator",
 ];
+
+/// Skills vendored from somewhere else rather than written here.
+///
+/// The context budget measures these but does not fail on them (DESIGN.md §13).
+/// That budget exists to stop *our* markdown from sprawling, and its remedy is
+/// deletion. Neither half applies to a file we did not write: the length is not
+/// ours to set, and the only real lever is whether to vendor the skill at all.
+/// `bevel context` still prints the number, so the cost stays visible.
+pub const VENDORED_SKILLS: [&str; 1] = ["skill-creator"];
+
+pub fn is_vendored(skill: &str) -> bool {
+    VENDORED_SKILLS.contains(&skill)
+}
 
 /// Subagents exist for context isolation: three independent searches that must
 /// not pollute the context where the interview happens, and two reviewers that
@@ -55,6 +73,7 @@ const COMMAND_PREFIXES: [&str; 2] = ["bevel ", "harness "];
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
     Wrote(String),
+    Removed(String),
     Skipped(String, &'static str),
 }
 
@@ -62,6 +81,7 @@ impl std::fmt::Display for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Action::Wrote(p) => write!(f, "  wrote   {p}"),
+            Action::Removed(p) => write!(f, "  removed {p}"),
             Action::Skipped(p, why) => write!(f, "  skipped {p} ({why})"),
         }
     }
@@ -102,10 +122,10 @@ fn sync_machine(
     let mut actions = Vec::new();
 
     for name in SKILLS {
-        let body = skill_body(layers, source, name)
+        let dir = skill_dir(layers, source, name)
             .with_context(|| format!("skill `{name}` is missing from the method tree"))?;
-        let dest = layers.claude_skills().join(name).join("SKILL.md");
-        actions.push(write_generated(&dest, &body, project, layers)?);
+        let dest = layers.claude_skills().join(name);
+        actions.extend(install_skill(&dir, &dest, project, layers)?);
     }
 
     for name in AGENT_DEFS {
@@ -142,20 +162,23 @@ fn sync_project(project: Option<&Project>, layers: &Layers, hooks: bool) -> Resu
     Ok(actions)
 }
 
+/// A skill's directory: user layer first, then the method tree.
+///
+/// Resolution is by directory rather than by file, and the whole directory is
+/// taken from one layer or the other. Merging them would let a user override
+/// SKILL.md and silently keep scripts the new instructions no longer match.
+pub fn skill_dir(layers: &Layers, source: &Source, name: &str) -> Option<PathBuf> {
+    [
+        layers.user_method().join("skills").join(name),
+        source.method_dir().join("skills").join(name),
+    ]
+    .into_iter()
+    .find(|d| d.join("SKILL.md").is_file())
+}
+
 /// A skill body: user layer first, then the method tree.
 pub fn skill_body(layers: &Layers, source: &Source, name: &str) -> Option<String> {
-    read_first(&[
-        layers
-            .user_method()
-            .join("skills")
-            .join(name)
-            .join("SKILL.md"),
-        source
-            .method_dir()
-            .join("skills")
-            .join(name)
-            .join("SKILL.md"),
-    ])
+    std::fs::read_to_string(skill_dir(layers, source, name)?.join("SKILL.md")).ok()
 }
 
 pub fn agent_body(layers: &Layers, source: &Source, name: &str) -> Option<String> {
@@ -198,6 +221,150 @@ fn display(project: Option<&Project>, layers: &Layers, path: &Path) -> String {
         Ok(rel) => format!("~/{}", rel.display()),
         Err(_) => path.display().to_string(),
     }
+}
+
+/// Install one skill: its instructions, plus whatever else it ships.
+///
+/// A skill was a single markdown file for as long as every skill was one, and
+/// most still are — for those this copies exactly one file and behaves as it
+/// always did. `skill-creator` is the exception that makes the rule wrong:
+/// its SKILL.md drives scripts and reference documents that must be on disk
+/// beside it, so installing the markdown alone yields a skill that loads and
+/// then fails at its first tool call.
+///
+/// SKILL.md keeps the generated-file treatment, since it is the one file a user
+/// might reasonably want to own. Everything else is copied byte for byte: the
+/// marker is an HTML comment, and appending it would break a Python script and
+/// misrepresent a vendored licence.
+fn install_skill(
+    src: &Path,
+    dest: &Path,
+    project: Option<&Project>,
+    layers: &Layers,
+) -> Result<Vec<Action>> {
+    let skill_md = src.join("SKILL.md");
+    let body = std::fs::read_to_string(&skill_md)
+        .with_context(|| format!("cannot read {}", skill_md.display()))?;
+    let mut actions = vec![write_generated(
+        &dest.join("SKILL.md"),
+        &body,
+        project,
+        layers,
+    )?];
+
+    let mut extras = Vec::new();
+    collect_files(src, src, &mut extras);
+    // Sorted so `bevel sync` reports the same order every run.
+    extras.sort();
+    for rel in extras {
+        if rel == Path::new("SKILL.md") {
+            continue;
+        }
+        actions.push(copy_verbatim(
+            &src.join(&rel),
+            &dest.join(&rel),
+            project,
+            layers,
+        )?);
+    }
+
+    actions.extend(prune_skill(src, dest, project, layers)?);
+    Ok(actions)
+}
+
+/// Remove what a skill used to ship and no longer does.
+///
+/// Without this an upgrade only ever adds: a script dropped upstream stays on
+/// disk forever, and the model finds a tool its instructions no longer mention.
+///
+/// Scoped hard, because `~/.claude/skills` is also where a user keeps skills of
+/// their own. This only ever descends into the directory of a skill we just
+/// installed, and it never removes a skill directory itself — dropping a name
+/// from `SKILLS` leaves its directory behind, which is the safe way to be wrong.
+fn prune_skill(
+    src: &Path,
+    dest: &Path,
+    project: Option<&Project>,
+    layers: &Layers,
+) -> Result<Vec<Action>> {
+    let mut actions = Vec::new();
+    if !dest.is_dir() {
+        return Ok(actions);
+    }
+
+    let mut installed = Vec::new();
+    collect_files(dest, dest, &mut installed);
+    installed.sort();
+    for rel in installed {
+        // Bytecode caches appear when the skill's own scripts run. They were
+        // never ours to install, and deleting them every sync would be churn.
+        if rel.components().any(|c| c.as_os_str() == "__pycache__") {
+            continue;
+        }
+        if src.join(&rel).is_file() {
+            continue;
+        }
+        let path = dest.join(&rel);
+        std::fs::remove_file(&path).with_context(|| format!("cannot remove {}", path.display()))?;
+        actions.push(Action::Removed(display(project, layers, &path)));
+    }
+
+    prune_empty_dirs(dest);
+    Ok(actions)
+}
+
+/// Directories a prune emptied. Depth first, and never the root it was given:
+/// `remove_dir` refuses anything non-empty, which is exactly the test wanted.
+fn prune_empty_dirs(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            prune_empty_dirs(&p);
+            let _ = std::fs::remove_dir(&p);
+        }
+    }
+}
+
+fn collect_files(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_files(&p, root, out);
+        } else if let Ok(rel) = p.strip_prefix(root) {
+            out.push(rel.to_path_buf());
+        }
+    }
+}
+
+/// Copy a file a skill ships beside its instructions, unchanged.
+///
+/// Overwritten when it differs rather than skipped as hand-edited, which is the
+/// opposite of how SKILL.md is treated. These are the skill's own assets, some
+/// of them third-party, and a local edit that quietly survives an update is how
+/// a vendored tree rots into something nobody can reason about. The supported
+/// override is the user method layer, which replaces the skill directory whole.
+fn copy_verbatim(
+    src: &Path,
+    dest: &Path,
+    project: Option<&Project>,
+    layers: &Layers,
+) -> Result<Action> {
+    let rel = display(project, layers, dest);
+    let bytes = std::fs::read(src).with_context(|| format!("cannot read {}", src.display()))?;
+    if std::fs::read(dest).is_ok_and(|existing| existing == bytes) {
+        return Ok(Action::Skipped(rel, "unchanged"));
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(dest, &bytes).with_context(|| format!("cannot write {}", dest.display()))?;
+    Ok(Action::Wrote(rel))
 }
 
 /// Write a file this tool owns, refusing to clobber anything hand-edited.
@@ -643,12 +810,123 @@ mod tests {
             .unwrap()
             .contains("name: spec-critic"));
         assert!(method_body(&l, &m, "nope").is_none());
-        assert_eq!(method_names().len(), 11);
+        assert_eq!(method_names().len(), 12);
 
         let src = l.user_method().join("skills/shape/SKILL.md");
         std::fs::create_dir_all(src.parent().unwrap()).unwrap();
         std::fs::write(&src, "custom shape\n").unwrap();
         assert_eq!(method_body(&l, &m, "shape").unwrap(), "custom shape\n");
+    }
+
+    /// A multi-file skill has to arrive whole. `skill-creator` calls scripts and
+    /// reference documents out of its SKILL.md, so the markdown on its own is a
+    /// skill that loads and then fails at its first tool call — and the licence
+    /// of a vendored skill has to travel with it to where it was installed.
+    #[test]
+    fn a_multi_file_skill_installs_its_whole_tree() {
+        let (_t, _p, l, m) = setup();
+        sync(None, &l, &m, false).unwrap();
+
+        let dir = l.claude_skills().join("skill-creator");
+        for rel in [
+            "SKILL.md",
+            "scripts/run_eval.py",
+            "references/schemas.md",
+            "agents/grader.md",
+            "LICENSE.txt",
+        ] {
+            assert!(dir.join(rel).is_file(), "{rel} was not installed");
+        }
+
+        // Byte for byte: the marker is an HTML comment, which would break the
+        // script and tamper with the licence.
+        let src = m.method_dir().join("skills/skill-creator");
+        for rel in ["scripts/run_eval.py", "LICENSE.txt"] {
+            assert_eq!(
+                std::fs::read(src.join(rel)).unwrap(),
+                std::fs::read(dir.join(rel)).unwrap(),
+                "{rel} was not copied verbatim"
+            );
+        }
+
+        // The obligation the copy exists to meet.
+        let licence = std::fs::read_to_string(dir.join("LICENSE.txt")).unwrap();
+        assert!(licence.contains("Apache License"));
+        assert!(licence.contains("Copyright 2026 Anthropic, PBC."));
+    }
+
+    /// Without a prune an upgrade only ever adds, and a script dropped upstream
+    /// stays on disk for the model to find.
+    #[test]
+    fn a_file_a_skill_no_longer_ships_is_removed() {
+        let (_t, _p, l, m) = setup();
+        sync(None, &l, &m, false).unwrap();
+
+        let dir = l.claude_skills().join("skill-creator");
+        let stale = dir.join("scripts/dropped_upstream.py");
+        std::fs::write(&stale, "gone\n").unwrap();
+        let nested = dir.join("old/deeper/note.md");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, "gone\n").unwrap();
+
+        let actions = sync(None, &l, &m, false).unwrap();
+        assert!(!stale.exists());
+        assert!(!nested.exists());
+        assert!(!dir.join("old").exists(), "emptied directories go too");
+        // What the skill does still ship is untouched.
+        assert!(dir.join("scripts/run_eval.py").is_file());
+        assert!(dir.join("LICENSE.txt").is_file());
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, Action::Removed(p) if p.ends_with("dropped_upstream.py"))));
+    }
+
+    /// `~/.claude/skills` is the user's directory too. A prune that wandered out
+    /// of the skill it was installing would delete someone else's work, so this
+    /// is the test that matters most about it.
+    #[test]
+    fn pruning_stays_inside_the_skill_it_installed() {
+        let (_t, _p, l, m) = setup();
+        let mine = l.claude_skills().join("my-own/SKILL.md");
+        std::fs::create_dir_all(mine.parent().unwrap()).unwrap();
+        std::fs::write(&mine, "---\nname: my-own\n---\nmine\n").unwrap();
+        let deep = l.claude_skills().join("my-own/scripts/thing.py");
+        std::fs::create_dir_all(deep.parent().unwrap()).unwrap();
+        std::fs::write(&deep, "mine\n").unwrap();
+
+        sync(None, &l, &m, false).unwrap();
+        assert!(mine.is_file(), "a personal skill was pruned");
+        assert!(deep.is_file(), "a personal skill was pruned");
+    }
+
+    /// Bytecode caches are created by running the skill, not by installing it.
+    #[test]
+    fn a_bytecode_cache_the_skill_created_survives() {
+        let (_t, _p, l, m) = setup();
+        sync(None, &l, &m, false).unwrap();
+        let cache = l
+            .claude_skills()
+            .join("skill-creator/scripts/__pycache__/utils.cpython-312.pyc");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, "bytecode").unwrap();
+
+        sync(None, &l, &m, false).unwrap();
+        assert!(cache.is_file());
+    }
+
+    /// The single-file skills predate directories and must be unaffected: one
+    /// file in, one file out, with nothing invented alongside it.
+    #[test]
+    fn a_single_file_skill_still_installs_as_one_file() {
+        let (_t, _p, l, m) = setup();
+        sync(None, &l, &m, false).unwrap();
+        let dir = l.claude_skills().join("shape");
+        let files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(files, ["SKILL.md"], "{files:?}");
     }
 
     #[test]

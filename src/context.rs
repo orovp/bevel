@@ -45,11 +45,20 @@ pub struct Item {
     pub limit: usize,
     pub tokens: usize,
     pub load: Load,
+    /// Vendored from elsewhere, so its length is measured but not enforced.
+    pub vendored: bool,
 }
 
 impl Item {
+    /// The measurement, which is the same fact whoever wrote the file.
     pub fn over(&self) -> bool {
         self.lines > self.limit
+    }
+
+    /// Whether being over is a failure. It is not, for a file we did not write:
+    /// see `sync::VENDORED_SKILLS`.
+    pub fn enforced(&self) -> bool {
+        self.over() && !self.vendored
     }
 }
 
@@ -61,8 +70,19 @@ pub struct Audit {
 }
 
 impl Audit {
+    /// What fails the budget. Vendored files are excluded on purpose; use
+    /// `vendored_over` to see them.
     pub fn over_budget(&self) -> Vec<&Item> {
-        self.items.iter().filter(|i| i.over()).collect()
+        self.items.iter().filter(|i| i.enforced()).collect()
+    }
+
+    /// Measured, over, and not our text to cut. Reported so that vendoring a
+    /// large skill stays a visible cost rather than a silent one.
+    pub fn vendored_over(&self) -> Vec<&Item> {
+        self.items
+            .iter()
+            .filter(|i| i.over() && i.vendored)
+            .collect()
     }
 }
 
@@ -80,6 +100,8 @@ fn measure(name: impl Into<String>, text: &str, limit: usize, load: Load) -> Ite
         limit,
         tokens: estimate_tokens(text),
         load,
+        // Set by the caller that knows; almost nothing is vendored.
+        vendored: false,
     }
 }
 
@@ -126,7 +148,9 @@ pub fn audit(project: &Project, layers: &Layers, source: &method::Source) -> Res
         } else {
             Load::OnDemand
         };
-        if let Some(i) = measure_file(label, &path, limit, load) {
+        let vendored = label.strip_prefix("skill/").is_some_and(sync::is_vendored);
+        if let Some(mut i) = measure_file(label, &path, limit, load) {
+            i.vendored = vendored;
             items.push(i);
         }
     }
@@ -174,7 +198,11 @@ pub fn render(audit: &Audit) -> String {
             i.limit,
             i.tokens,
             i.load.as_str(),
-            if i.over() { "   OVER" } else { "" }
+            match (i.over(), i.vendored) {
+                (true, false) => "   OVER",
+                (true, true) => "   OVER (vendored)",
+                _ => "",
+            }
         ));
     }
     out.push_str(&format!(
@@ -194,6 +222,23 @@ pub fn render(audit: &Audit) -> String {
             ));
         }
         out.push_str("\nThe question each release is not what to add, but what to stop doing.\n");
+    }
+
+    // Listed after the verdict rather than inside it: this is a cost that was
+    // accepted, not a regression to fix, and the only lever left is whether to
+    // keep vendoring the skill.
+    let vendored = audit.vendored_over();
+    if !vendored.is_empty() {
+        out.push_str(&format!(
+            "\n{} vendored, over its limit and not enforced:\n",
+            vendored.len()
+        ));
+        for i in vendored {
+            out.push_str(&format!(
+                "  {} is {} lines, limit {}\n",
+                i.name, i.lines, i.limit
+            ));
+        }
     }
     out
 }
@@ -243,10 +288,62 @@ mod tests {
         std::fs::write(p.root.join("CLAUDE.md"), bloat).unwrap();
 
         let a = audit(&p, &l, &m).unwrap();
-        let over = a.over_budget();
-        assert_eq!(over.len(), 1);
-        assert_eq!(over[0].name, "CLAUDE.md");
+        // Named rather than counted: what else the method tree happens to
+        // contain is the business of the budget test, not of this one.
+        assert!(a.over_budget().iter().any(|i| i.name == "CLAUDE.md"));
         assert!(render(&a).contains("OVER"));
+    }
+
+    /// A vendored skill is measured like any other and shown when it is over,
+    /// but it does not fail the budget: its length was never ours to cut, and
+    /// the only lever is whether to vendor it at all.
+    #[test]
+    fn a_vendored_skill_is_measured_but_not_enforced() {
+        let (_t, p, l, m) = setup();
+        let a = audit(&p, &l, &m).unwrap();
+
+        let sc = a
+            .items
+            .iter()
+            .find(|i| i.name == "skill/skill-creator")
+            .expect("skill-creator is part of the shipped method");
+        assert!(sc.vendored);
+        // The whole case rests on it being over the limit.
+        assert!(sc.over(), "{} lines, limit {}", sc.lines, sc.limit);
+        assert!(!sc.enforced());
+        assert!(!a
+            .over_budget()
+            .iter()
+            .any(|i| i.name == "skill/skill-creator"));
+
+        // Excluded from the verdict, but never hidden.
+        let text = render(&a);
+        assert!(text.contains("OVER (vendored)"), "{text}");
+        assert!(text.contains("not enforced"), "{text}");
+    }
+
+    /// The exemption is per-skill, not a general loosening: text we wrote is
+    /// still held to the limit, which is the point of the budget.
+    #[test]
+    fn a_skill_we_wrote_ourselves_is_still_enforced() {
+        let (_t, p, l, m) = setup();
+        let src = l.user_method().join("skills/rust-architecture/SKILL.md");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        let huge: String = (0..400).map(|i| format!("l{i}\n")).collect();
+        std::fs::write(&src, huge).unwrap();
+
+        let a = audit(&p, &l, &m).unwrap();
+        let item = a
+            .items
+            .iter()
+            .find(|i| i.name == "skill/rust-architecture")
+            .unwrap();
+        assert!(!item.vendored);
+        assert!(item.enforced());
+        assert!(a
+            .over_budget()
+            .iter()
+            .any(|i| i.name == "skill/rust-architecture"));
     }
 
     #[test]
