@@ -9,7 +9,8 @@
   "files": [
     "bin/bevel.js",
     "bin/postinstall.js",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=18"

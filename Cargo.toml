@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.74"
 description = "Spec-driven development harness for coding agents"
-license = "MIT"
+# The crate is MIT. The published tarball also carries method/skills/skill-creator,
+# vendored from https://github.com/anthropics/skills under Apache-2.0 — see NOTICE.
+license = "MIT AND Apache-2.0"
 readme = "README.md"
 keywords = ["agent", "spec-driven", "claude", "bevel", "cli"]
 categories = ["command-line-utilities", "development-tools"]

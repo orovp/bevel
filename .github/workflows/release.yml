@@ -102,7 +102,7 @@ jobs:
           VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
           mkdir -p dist/bevel/bin
           cp npm/bevel/bin/bevel.js npm/bevel/bin/postinstall.js dist/bevel/bin/
-          cp README.md dist/bevel/
+          cp README.md LICENSE dist/bevel/
           sed "s/\"0\.1\.0\"/\"$VERSION\"/g" npm/bevel/package.json > dist/bevel/package.json
           (cd dist/bevel && npm publish --access public)
 

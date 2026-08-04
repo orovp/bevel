@@ -71,6 +71,7 @@ mkdir -p "$main/bin"
 cp "$ROOT/npm/bevel/bin/bevel.js" "$main/bin/bevel.js"
 cp "$ROOT/npm/bevel/bin/postinstall.js" "$main/bin/postinstall.js"
 cp "$ROOT/README.md" "$main/README.md"
+cp "$ROOT/LICENSE" "$main/LICENSE"
 sed "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/g; \
      s/\"0\.1\.0\"/\"$VERSION\"/g" \
   "$ROOT/npm/bevel/package.json" >"$main/package.json"
