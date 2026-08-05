@@ -1133,6 +1133,36 @@ artifacts get the same treatment as everything else.
 every cross-reference in `decisions.md` for the sake of a directory listing nobody reads
 sequentially. The index does the organizing; the filesystem stays boring.
 
+### The human channel: four HTML reports
+
+Everything above is written for an agent to parse. Four things in this design are not, and they
+are the four places where a person has to hold several documents in their head at once:
+
+| Command | The question it answers | Why a terminal cannot |
+|---|---|---|
+| `bevel review <id>` | *Is this contract worth freezing?* — or, past implementation, *did the work meet the contract that was frozen?* | It is a cross-read of five files: spec, criteria, `decisions.md`, `open-questions.md`, `notes.md`. And a tier C criterion points into `mockup.html §2`, which a terminal cannot show you. |
+| `bevel board` | Where is everything, how old, and which gates reopened? | `status` is fixed-size *by design* (§13). The constraint belongs to the channel, not to the question. |
+| `bevel doctor --context --html` | Is the harness growing? | The failure §13 names is *slow*. A table shows one instant; only a slope shows accretion. Reconstructed from `git log --numstat`. |
+| `bevel index --html` | What did we ever decide, and what did we reject? What superseded what? | `decisions.md` is per spec, so the cross-spec question has nowhere to be asked. Supersession is a graph with per-criterion edges. |
+
+Five rules keep these from becoming the liability the mockup rule (§6) warns about. The first four
+are that rule, generalised; the fifth is new and is the one that matters most:
+
+1. **One file, no network.** Opened from `file://`, sometimes over SSH.
+2. **Regenerated, never edited.** They live in `.bevel/cache/`, which is gitignored.
+3. **Only a human reads one.** No agent ever opens one back — every fact in a report is already
+   available from `--json` or from the markdown it was rendered from, and HTML costs several times
+   the tokens of that markdown. A report read back into a prompt is a §13 regression.
+4. **The markdown stays canonical.** These render `decisions.md`; they do not replace it.
+5. **No control that changes state.** No approve button, no close button, no form. Every report
+   ends in the command to type. `approve` is TTY-gated precisely so an agent cannot cross it, and
+   *the agent is what generated the page* — a button there would make the gate decorative.
+
+Rendered by the CLI rather than by an agent, which follows from the same split as everything else:
+the data already exists behind `--json`, so rendering it costs zero tokens, is identical on every
+run, is unit-testable, and works on a tier 0 agent (§9). `mockup-builder` stays the one exception,
+because a mockup is invention rather than a query.
+
 ### Where determinism actually enters
 
 Your intuition that "these tools help the agent be more reliable" is right, but the mechanism is

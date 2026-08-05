@@ -9,8 +9,11 @@
 
 use anyhow::Result;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::path::Path;
+use std::process::Command;
 
+use crate::html::{self, card, escape, pill, Page};
 use crate::method;
 use crate::paths::Layers;
 use crate::project::Project;
@@ -47,6 +50,11 @@ pub struct Item {
     pub load: Load,
     /// Vendored from elsewhere, so its length is measured but not enforced.
     pub vendored: bool,
+    /// Repo-relative, when the file is in the project at all. The method often
+    /// resolves out of `$HOME`, and a file git has never seen has no history to
+    /// plot — which is a fact worth keeping rather than papering over.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 impl Item {
@@ -102,6 +110,7 @@ fn measure(name: impl Into<String>, text: &str, limit: usize, load: Load) -> Ite
         load,
         // Set by the caller that knows; almost nothing is vendored.
         vendored: false,
+        path: None,
     }
 }
 
@@ -110,23 +119,46 @@ fn measure_file(name: impl Into<String>, path: &Path, limit: usize, load: Load) 
     Some(measure(name, &text, limit, load))
 }
 
+/// As `measure_file`, but remembering where the file was when it is inside the
+/// project — which is what makes the trend in the HTML report possible.
+fn measure_tracked(
+    name: impl Into<String>,
+    path: &Path,
+    limit: usize,
+    load: Load,
+    root: &Path,
+) -> Option<Item> {
+    let mut item = measure_file(name, path, limit, load)?;
+    item.path = path
+        .strip_prefix(root)
+        .ok()
+        .map(|p| p.to_string_lossy().replace('\\', "/"));
+    Some(item)
+}
+
 pub fn audit(project: &Project, layers: &Layers, source: &method::Source) -> Result<Audit> {
     let mut items = Vec::new();
 
     // Loaded every turn, and now the only file that is: the pipeline notes
     // live in CLAUDE.md itself rather than behind a pointer.
-    if let Some(i) = measure_file(
+    if let Some(i) = measure_tracked(
         "CLAUDE.md",
         &project.root.join("CLAUDE.md"),
         50,
         Load::Always,
+        &project.root,
     ) {
         items.push(i);
     }
     for pkg in &project.config.packages {
         let path = project.root.join(&pkg.path).join("AGENTS.md");
-        if let Some(i) = measure_file(format!("{}/AGENTS.md", pkg.path), &path, 30, Load::OnDemand)
-        {
+        if let Some(i) = measure_tracked(
+            format!("{}/AGENTS.md", pkg.path),
+            &path,
+            30,
+            Load::OnDemand,
+            &project.root,
+        ) {
             items.push(i);
         }
     }
@@ -149,7 +181,7 @@ pub fn audit(project: &Project, layers: &Layers, source: &method::Source) -> Res
             Load::OnDemand
         };
         let vendored = label.strip_prefix("skill/").is_some_and(sync::is_vendored);
-        if let Some(mut i) = measure_file(label, &path, limit, load) {
+        if let Some(mut i) = measure_tracked(label, &path, limit, load, &project.root) {
             i.vendored = vendored;
             items.push(i);
         }
@@ -243,6 +275,207 @@ pub fn render(audit: &Audit) -> String {
     out
 }
 
+/// How many commits back the trend looks. Enough to cover a few months of a
+/// harness that should barely change, and bounded so one `git log` stays cheap.
+const HISTORY_DEPTH: usize = 80;
+
+/// The harness's size over time, reconstructed from git.
+///
+/// This section names the failure this project is most likely to have, and it
+/// is a *slow* one: not a bug, but three thousand lines of markdown accumulated
+/// over six months. A single measurement cannot see it — a table says the
+/// harness is four hundred lines today and has no way to say it was two hundred
+/// in March. So: one `git log --numstat` for the deltas, and the totals walk
+/// backwards from what is on disk now.
+///
+/// Approximate on purpose. Renames drop out of the window and files that live
+/// in `$HOME` were never in git at all; the number that matters is whether the
+/// line is climbing, not whether a point is eight lines out.
+pub fn history(project: &Project, audit: &Audit) -> Vec<(String, usize)> {
+    let tracked: BTreeMap<&str, usize> = audit
+        .items
+        .iter()
+        .filter_map(|i| Some((i.path.as_deref()?, i.lines)))
+        .collect();
+    if tracked.is_empty() {
+        return Vec::new();
+    }
+
+    let mut cmd = Command::new("git");
+    cmd.args(["log", "--numstat", "--date=short", "--format=%x01%ad"])
+        .arg(format!("-n{HISTORY_DEPTH}"))
+        .arg("--")
+        .args(tracked.keys())
+        .current_dir(&project.root);
+    let Ok(out) = cmd.output() else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut running: i64 = tracked.values().sum::<usize>() as i64;
+    let mut points: Vec<(String, usize)> = Vec::new();
+    let mut open: Option<(String, i64)> = None;
+
+    for line in text.lines() {
+        if let Some(date) = line.strip_prefix('\x01') {
+            // `running` is the total as of the end of the commit just closed.
+            if let Some((d, delta)) = open.take() {
+                points.push((d, running.max(0) as usize));
+                running -= delta;
+            }
+            open = Some((date.to_string(), 0));
+            continue;
+        }
+        let Some((added, rest)) = line.split_once('\t') else {
+            continue;
+        };
+        let Some((deleted, path)) = rest.split_once('\t') else {
+            continue;
+        };
+        // A binary file, or a rename we cannot follow: `-` in both columns.
+        let (Ok(added), Ok(deleted)) = (added.parse::<i64>(), deleted.parse::<i64>()) else {
+            continue;
+        };
+        if tracked.contains_key(path) {
+            if let Some((_, delta)) = open.as_mut() {
+                *delta += added - deleted;
+            }
+        }
+    }
+    if let Some((d, _)) = open {
+        points.push((d, running.max(0) as usize));
+    }
+
+    points.reverse();
+    // One point per day, the last of that day: a busy afternoon is not a trend.
+    let mut per_day: Vec<(String, usize)> = Vec::with_capacity(points.len());
+    for p in points {
+        match per_day.last_mut() {
+            Some(last) if last.0 == p.0 => *last = p,
+            _ => per_day.push(p),
+        }
+    }
+    per_day
+}
+
+pub fn render_html(audit: &Audit, history: &[(String, usize)]) -> Page {
+    let over = audit.over_budget();
+    let vendored = audit.vendored_over();
+
+    let by_load = |l: Load| -> usize {
+        audit
+            .items
+            .iter()
+            .filter(|i| i.load == l)
+            .map(|i| i.tokens)
+            .sum()
+    };
+    let composition = html::stacked(&[
+        ("always", by_load(Load::Always)),
+        ("on invocation", by_load(Load::OnInvocation)),
+        ("on demand", by_load(Load::OnDemand)),
+    ]);
+
+    let verdict = if over.is_empty() {
+        format!(
+            "<p class=note>Every file we own is within its budget.{}</p>",
+            if vendored.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " {} vendored file{} sits over its limit; that cost was accepted \
+                     when it was vendored, and the only lever left is whether to keep it.",
+                    vendored.len(),
+                    if vendored.len() == 1 { "" } else { "s" }
+                )
+            }
+        )
+    } else {
+        let items: String = over
+            .iter()
+            .map(|i| {
+                format!(
+                    "<li><code>{}</code> is {} lines against a budget of {}</li>",
+                    escape(&i.name),
+                    i.lines,
+                    i.limit
+                )
+            })
+            .collect();
+        format!(
+            "<p class=note>{} file{} over budget.</p><ul>{items}</ul>\
+             <p class=note>The question each release is not what else to add, but \
+             <b>what to stop doing</b>. Every new model makes some scaffolding obsolete.</p>",
+            over.len(),
+            if over.len() == 1 { "" } else { "s" }
+        )
+    };
+
+    let mut body = format!(
+        "<section class=\"card {}\"><h2>Every turn</h2>\
+         <p class=big>~{} tokens</p>\
+         <p class=note>enter the model's context unconditionally, before you have \
+         typed anything. Everything else is paid for only when it is read.</p>\
+         {composition}{verdict}</section>\n",
+        if over.is_empty() { "" } else { "warn" },
+        audit.always_tokens,
+    );
+
+    body.push_str(&card(
+        "Trend",
+        &format!(
+            "{}<p class=note>The failure this design predicts for itself is slow: \
+             in six months the harness is three thousand lines of markdown arguing \
+             with the model. A single measurement cannot see that coming — only the \
+             slope can. Reconstructed from git, so files resolved out of \
+             <code>$HOME</code> do not appear.</p>",
+            html::line_chart(history, "lines of harness, over time")
+        ),
+    ));
+
+    let rows: String = audit
+        .items
+        .iter()
+        .map(|i| {
+            format!(
+                "<tr><td><code>{}</code></td><td>{}</td><td>{}</td>\
+                 <td style=\"text-align:right\">{}</td><td>{}</td></tr>",
+                escape(&i.name),
+                pill(load_class(i.load), i.load.as_str()),
+                html::meter(i.lines, i.limit, &format!("{} / {}", i.lines, i.limit)),
+                i.tokens,
+                match (i.over(), i.vendored) {
+                    (true, false) => pill("bad", "over"),
+                    (true, true) => pill("mute", "over, vendored"),
+                    _ => String::new(),
+                }
+            )
+        })
+        .collect();
+    body.push_str(&card(
+        "Every file the harness can load",
+        &format!(
+            "<div class=scroll><table><tr><th>file</th><th>loaded</th>\
+             <th>lines against budget</th><th>~tokens</th><th></th></tr>{rows}</table></div>"
+        ),
+    ));
+
+    Page::new("Context budget", "bevel doctor --context --html")
+        .subtitle("A linter for the harness itself")
+        .body(body)
+}
+
+fn load_class(l: Load) -> &'static str {
+    match l {
+        Load::Always => "b",
+        Load::OnInvocation => "c",
+        Load::OnDemand => "mute",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,6 +496,82 @@ mod tests {
             origin: "repo".into(),
         };
         (tmp, project, layers, source)
+    }
+
+    /// `git init` plus two commits, so the trend has something to reconstruct.
+    /// Config is passed per-invocation because the machine running the tests may
+    /// have no global identity, and a test that depends on one is a test that
+    /// fails in CI for a reason unrelated to what it checks.
+    fn git(root: &std::path::Path, args: &[&str]) -> bool {
+        Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(root)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn the_trend_reconstructs_earlier_sizes_from_the_deltas() {
+        let (_t, p, l, m) = setup();
+        if !git(&p.root, &["init", "-q"]) {
+            return; // No git on this machine; the report degrades to no trend.
+        }
+
+        std::fs::write(p.root.join("CLAUDE.md"), "one\ntwo\n").unwrap();
+        assert!(git(&p.root, &["add", "CLAUDE.md"]));
+        assert!(git(&p.root, &["commit", "-qm", "first"]));
+
+        std::fs::write(p.root.join("CLAUDE.md"), "one\ntwo\nthree\nfour\nfive\n").unwrap();
+        assert!(git(&p.root, &["commit", "-qam", "second"]));
+
+        let a = audit(&p, &l, &m).unwrap();
+        let h = history(&p, &a);
+        assert_eq!(h.len(), 1, "both commits are the same day: {h:?}");
+        assert_eq!(h[0].1, 5, "the day ends at the later size");
+
+        // And the file has to be findable in the first place.
+        assert!(a
+            .items
+            .iter()
+            .any(|i| i.name == "CLAUDE.md" && i.path.as_deref() == Some("CLAUDE.md")));
+    }
+
+    #[test]
+    fn outside_a_git_repository_the_report_simply_has_no_trend() {
+        let (_t, p, l, m) = setup();
+        let a = audit(&p, &l, &m).unwrap();
+        let html = render_html(&a, &history(&p, &a)).render();
+        assert!(html.contains("Not enough history"));
+        assert!(html.contains("Context budget"));
+    }
+
+    #[test]
+    fn the_html_report_leads_with_what_enters_every_turn() {
+        let (_t, p, l, m) = setup();
+        std::fs::write(
+            p.root.join("CLAUDE.md"),
+            (0..80).map(|i| format!("line {i}\n")).collect::<String>(),
+        )
+        .unwrap();
+        let a = audit(&p, &l, &m).unwrap();
+        let html = render_html(&a, &[]).render();
+
+        assert!(html.contains("tokens"));
+        assert!(html.contains("what to stop doing"));
+        assert!(html.contains("class=\"card warn\""), "over budget is loud");
+        // Same invariant as every other report: it reports, it does not act.
+        for probe in ["<form", "<button", "onclick"] {
+            assert!(!html.contains(probe), "found `{probe}`");
+        }
     }
 
     #[test]

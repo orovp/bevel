@@ -108,8 +108,9 @@ Address what it reports.
 
 ```
 bevel validate <id>
+bevel review <id>      # the dossier the human approves from
 ```
 
 Then stop. **You cannot approve.** `bevel approve` requires a terminal and
 you do not have one — that is the gate working, not a problem to route around.
-Tell the user what to run and what changed.
+Give them the dossier path and say what changed.

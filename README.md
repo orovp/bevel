@@ -40,6 +40,7 @@ bevel inbox add "let documents sync between devices"
 bevel shape 1                  # reserves an id, scaffolds specs/0001-.../
                                  # → run /shape in your agent
 bevel validate 1               # deterministic rules; promotes draft → review
+bevel review 1                 # the dossier you approve from, as a page
 bevel approve 1                # you, in a terminal. Freezes a hash
                                  # → run /implement in your agent
 bevel verify --affected        # only what changed, plus its dependents
@@ -126,6 +127,21 @@ what it injects and fails past the limits in DESIGN.md §13. The likeliest way
 this project dies is becoming three thousand lines of markdown arguing with the
 model, so that number is a test rather than a note. It currently sits at ~351
 tokens per turn unconditionally.
+
+**Four reports are HTML, and only humans read them.** Everything an agent
+consumes is markdown or `--json`; a page costs several times the tokens of the
+text it came from, so nothing here is ever read back into a prompt.
+
+```
+bevel review <id>              # the dossier behind approving, or closing
+bevel board                    # the pipeline enumeration status refuses to be
+bevel doctor --context --html  # the budget, with the trend a table cannot show
+bevel index --html             # every decision ever made, and what superseded what
+```
+
+None of them can act. Each ends in the command to type, because the terminal
+check on `approve` is the only thing standing between an agent and its own
+approval — and the agent is what generated the page.
 
 ## Status
 

@@ -36,3 +36,9 @@ pipeline works in any agent whether or not it has slash commands.
 <!-- Conventions and traps a competent newcomer to this repo would get wrong.
      Not a tutorial, and not anything the file tree already says.
      Keep this file under 50 lines. -->
+
+`bevel review`, `board`, `doctor --context --html` and `index --html` write
+HTML into `.bevel/cache/`. **Never read one back.** They exist for a human's
+eyes; a page costs several times the tokens of the markdown behind it, and
+every fact in one is available to you from `--json` or the source file. Point
+the user at the path and move on.

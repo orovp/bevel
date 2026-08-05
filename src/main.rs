@@ -6,8 +6,9 @@ use std::process::ExitCode;
 use bevel::project::Project;
 use bevel::spec::{Spec, Status};
 use bevel::{
-    affected, config, context, docs, gate, inbox, index, lifecycle, lockfile, method, migrate,
-    packs, paths, project, spec, summary, sync, templates, validate, verify, workspace, VERSION,
+    affected, board, config, context, docs, gate, inbox, index, lifecycle, lockfile, method,
+    migrate, packs, paths, project, review, spec, summary, sync, templates, validate, verify,
+    workspace, VERSION,
 };
 
 #[derive(Parser)]
@@ -45,8 +46,12 @@ enum Command {
     Close(IdArgs),
     /// Release the active slot without losing the approval
     Pause(IdArgs),
+    /// Assemble the dossier a human approves or closes from
+    Review(ReviewArgs),
+    /// The whole pipeline on one page, for a human
+    Board(OpenArgs),
     /// Regenerate specs/README.md
-    Index,
+    Index(IndexArgs),
     /// Fixed-size summary, independent of spec count
     Status(StatusArgs),
     /// Enumerate specs
@@ -110,6 +115,32 @@ struct IdArgs {
     id: Option<String>,
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args)]
+struct ReviewArgs {
+    /// Spec id: 7, 0007 or 0007-slug
+    id: String,
+    /// Also open it in the default browser
+    #[arg(long)]
+    open: bool,
+}
+
+#[derive(Args)]
+struct IndexArgs {
+    /// Also write the decision log and supersession graph, for a human
+    #[arg(long)]
+    html: bool,
+    /// With --html, also open it in the default browser
+    #[arg(long)]
+    open: bool,
+}
+
+#[derive(Args)]
+struct OpenArgs {
+    /// Also open it in the default browser
+    #[arg(long)]
+    open: bool,
 }
 
 #[derive(Args)]
@@ -196,6 +227,12 @@ struct DoctorArgs {
     /// Audit what the harness injects against its token budget
     #[arg(long)]
     context: bool,
+    /// Render the audit as a page, with the trend a table cannot show
+    #[arg(long)]
+    html: bool,
+    /// With --html, also open it in the default browser
+    #[arg(long)]
+    open: bool,
     #[arg(long)]
     json: bool,
 }
@@ -281,10 +318,23 @@ fn run() -> Result<ExitCode> {
         Command::Start(args) => cmd_start(args),
         Command::Close(args) => cmd_close(args),
         Command::Pause(args) => cmd_pause(args),
-        Command::Index => {
+        Command::Review(args) => cmd_review(args),
+        Command::Board(args) => {
+            let p = Project::discover()?;
+            let path = board::write(&p, args.open)?;
+            println!("wrote {}", p.display_path(&path));
+            println!("  file://{}", path.display());
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Index(args) => {
             let p = Project::discover()?;
             let path = index::write(&p)?;
             println!("wrote {}", p.display_path(&path));
+            if args.html {
+                let html = index::write_html(&p, args.open)?;
+                println!("wrote {}", p.display_path(&html));
+                println!("  file://{}", html.display());
+            }
             Ok(ExitCode::SUCCESS)
         }
         Command::Status(args) => cmd_status(args),
@@ -733,6 +783,11 @@ fn cmd_doctor(args: DoctorArgs) -> Result<ExitCode> {
         let audit = context::audit(&p, &layers, &m)?;
         if args.json {
             println!("{}", serde_json::to_string_pretty(&audit)?);
+        } else if args.html {
+            let page = context::render_html(&audit, &context::history(&p, &audit));
+            let path = bevel::html::write(&p, "context-budget.html", &page, args.open)?;
+            println!("wrote {}", p.display_path(&path));
+            println!("  file://{}", path.display());
         } else {
             print!("{}", context::render(&audit));
         }
@@ -1077,6 +1132,12 @@ fn cmd_close(args: IdArgs) -> Result<ExitCode> {
         for b in &blockers {
             eprintln!("  {}", b.explain(&s.front.id));
         }
+        // Tier C in particular is unjudgeable from a terminal — it points into
+        // the mockup, and the report is where the two sit side by side.
+        eprintln!(
+            "\nthe criteria and their evidence: bevel review {}",
+            s.front.id
+        );
         return Ok(ExitCode::FAILURE);
     }
 
@@ -1119,6 +1180,18 @@ fn run_verification(p: &Project) -> Result<bool> {
     let results = verify::run(&p.root, &active, &ws.packages, &scope, None)?;
     println!("{}", verify::summarise(&results));
     Ok(results.iter().all(|r| r.ok()))
+}
+
+/// The human channel. Everything an agent needs is behind `--json` on the other
+/// commands; this one exists so a person can hold five files in their head at
+/// once, and it deliberately cannot act on what it shows.
+fn cmd_review(args: ReviewArgs) -> Result<ExitCode> {
+    let p = Project::discover()?;
+    let s = spec::find(&p.specs_dir(), &args.id)?;
+    let path = review::write(&p, &s, args.open)?;
+    println!("wrote {}", p.display_path(&path));
+    println!("  file://{}", path.display());
+    Ok(ExitCode::SUCCESS)
 }
 
 fn cmd_pause(args: IdArgs) -> Result<ExitCode> {

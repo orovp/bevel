@@ -90,7 +90,8 @@ records the commit that shipped it.
 If the spec has tier C criteria it will refuse for you too, and print them as a
 checklist — only a human may confirm those, in a terminal. That is not an
 obstacle to work around: a model grading its own subjective quality always
-awards itself a pass. Report the checklist and ask.
+awards itself a pass. Run `bevel review <id>`, which puts each criterion beside
+the mockup section it names, and give them that path with the checklist.
 
 Before closing, resolve every deviation in `notes.md` one of three ways: fix it,
 amend the spec (which reopens the gate for re-approval, correctly), or file it
