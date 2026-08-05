@@ -61,7 +61,8 @@ be worth offering. Discard the prototype, keep the findings in `decisions.md`.
 
 If the shape is visual, breadboard first: places, affordances, connections, in
 plain text. That usually settles it. When it does not, dispatch
-`mockup-builder`.
+`mockup-builder`. It returns numbered states — `§1 empty`, `§2 conflict` — and
+those numbers are what tier C criteria point at below.
 
 ## 6. Name the acceptance criteria
 
@@ -95,6 +96,9 @@ Rules that matter:
 - At least one tier A or B is mandatory. If you cannot name a single one, the
   spec is still vague — that is the signal, surface it rather than inventing a
   criterion to satisfy the check.
+- A tier C criterion that cites the mockup cites a section that exists:
+  `mockup.html §2`, resolved by `bevel validate` against the mockup's anchors.
+  A pointer that dangles is found by the human at close, far too late.
 
 ## 7. Critique your own spec, then hand it over
 

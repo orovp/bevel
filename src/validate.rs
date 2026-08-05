@@ -55,8 +55,110 @@ pub fn validate(project: &Project, spec: &Spec) -> Result<Vec<Finding>> {
     }
 
     findings.extend(check_tier_a_tests_exist(project, spec)?);
+    findings.extend(check_mockup_references(spec)?);
     findings.extend(check_supersessions(project, spec)?);
     Ok(findings)
+}
+
+/// The `id` a mockup section must carry for `§2` to resolve.
+fn anchor(section: u32) -> String {
+    format!("s{section}")
+}
+
+/// Tier C criteria point into the mockup by section — "the conflict banner
+/// matches mockup.html §2" — and that pointer is the whole reason a judged
+/// criterion is reviewable in ten seconds instead of three paragraphs.
+///
+/// A pointer that does not resolve is otherwise discovered at the worst
+/// possible moment: by the human, at close, with the work already done.
+/// Resolving it here is the same move the rest of this module makes — a
+/// judgment ("is this criterion checkable?") becomes an exit code.
+fn check_mockup_references(spec: &Spec) -> Result<Vec<Finding>> {
+    let referenced: Vec<(String, u32)> = spec
+        .front
+        .acceptance
+        .iter()
+        .filter_map(|c| match c {
+            Criterion::C { text } => Some(text),
+            _ => None,
+        })
+        .flat_map(|text| {
+            sections_referenced(text)
+                .into_iter()
+                .map(move |n| (text.clone(), n))
+        })
+        .collect();
+
+    if referenced.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let path = spec.dir.join("mockup.html");
+    let Ok(html) = std::fs::read_to_string(&path) else {
+        return Ok(vec![Finding {
+            rule: "mockup/missing-file",
+            message: format!(
+                "{} tier C criteria point into mockup.html, which does not exist in {}",
+                referenced.len(),
+                spec.slug()
+            ),
+        }]);
+    };
+
+    let mut findings = Vec::new();
+    for (text, section) in referenced {
+        if !has_anchor(&html, &anchor(section)) {
+            findings.push(Finding {
+                rule: "mockup/dangling-section",
+                message: format!(
+                    "tier C criterion `{text}` points at mockup.html §{section}, \
+                     but the mockup has no `id=\"{}\"` section",
+                    anchor(section)
+                ),
+            });
+        }
+    }
+    Ok(findings)
+}
+
+/// Section numbers a criterion refers to, as `§N`.
+///
+/// Only fires when the criterion actually mentions the mockup, so that a `§`
+/// used for anything else — a spec quoting `RFC 7231 §3` is the realistic
+/// case — is left alone.
+fn sections_referenced(text: &str) -> Vec<u32> {
+    if !text.to_ascii_lowercase().contains("mockup") {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find('§') {
+        rest = &rest[at + '§'.len_utf8()..];
+        let digits: String = rest
+            .trim_start()
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        if let Ok(n) = digits.parse::<u32>() {
+            out.push(n);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Quoted, single-quoted and bare attribute forms all count: the mockup is
+/// written by hand and rejecting it over a quote style would be pedantry.
+fn has_anchor(html: &str, id: &str) -> bool {
+    [
+        format!("id=\"{id}\""),
+        format!("id='{id}'"),
+        format!("id={id}>"),
+        format!("id={id} "),
+    ]
+    .iter()
+    .any(|form| html.contains(form.as_str()))
 }
 
 /// Every tier A criterion must name a test that actually exists.
@@ -348,6 +450,62 @@ mod tests {
         assert!(validate(&p, &spec).unwrap().is_empty());
     }
 
+    #[test]
+    fn a_tier_c_criterion_pointing_at_a_missing_mockup_section_is_caught() {
+        let (_t, p) = project();
+        let dir = write_spec(
+            &p,
+            "0001",
+            "example",
+            "acceptance:\n- tier: B\n  cmd: 'true'\n\
+             - tier: C\n  text: 'the conflict banner matches mockup.html §2'\n",
+        );
+        let spec = Spec::load(&dir).unwrap();
+
+        // No mockup at all.
+        let f = validate(&p, &spec).unwrap();
+        assert!(f.iter().any(|f| f.rule == "mockup/missing-file"), "{f:?}");
+
+        // A mockup, but not that section.
+        std::fs::write(
+            dir.join("mockup.html"),
+            "<html><body><section id=\"s1\">empty state</section></body></html>",
+        )
+        .unwrap();
+        let f = validate(&p, &spec).unwrap();
+        assert!(
+            f.iter().any(|f| f.rule == "mockup/dangling-section"),
+            "{f:?}"
+        );
+
+        // The section it names.
+        std::fs::write(
+            dir.join("mockup.html"),
+            "<html><body><section id=\"s1\">empty</section>\
+             <section id=\"s2\">conflict banner</section></body></html>",
+        )
+        .unwrap();
+        assert!(validate(&p, &spec).unwrap().is_empty());
+    }
+
+    /// A `§` that has nothing to do with the mockup must not drag a spec into
+    /// a rule about mockups.
+    #[test]
+    fn a_section_sign_outside_a_mockup_reference_is_left_alone() {
+        assert_eq!(sections_referenced("matches mockup.html §2"), vec![2]);
+        assert_eq!(
+            sections_referenced("follows RFC 7231 §3"),
+            Vec::<u32>::new()
+        );
+        assert_eq!(
+            sections_referenced("mockup.html §2 and §10, plus §2 again"),
+            vec![2, 10]
+        );
+    }
+
+    /// The regression that made `bevel validate` fail on every spec that had
+    /// ever been implemented: the plan moves `acceptance.*` out of the spec
+    /// folder by design, and the rule was still looking only there.
     #[test]
     fn relocating_the_acceptance_file_does_not_make_the_spec_invalid() {
         let (_t, p) = project();

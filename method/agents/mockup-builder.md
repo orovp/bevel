@@ -23,6 +23,11 @@ Constraints on the file, all of them load-bearing:
   point is to make the review conversation concrete.
 - **Label the states.** Empty, loading, error and the awkward case the spec is
   actually about. A mockup of the happy path answers nothing worth asking.
+- **Number every state and anchor it.** Each one is a `<section id="s1">` with
+  its `§1` visible in the heading, and the file opens with an index of them.
+  This is load-bearing, not tidiness: a tier C criterion reads *"matches
+  mockup.html §2"*, `bevel validate` resolves that reference against these
+  anchors, and a section that cannot be pointed at cannot anchor a criterion.
 
 Do not attempt production markup. This is not the implementation and nothing in
 it will be reused — accessibility scaffolding, component structure and
@@ -40,4 +45,5 @@ That is not decoration. A mockup kept alive after the feature ships becomes a
 second interface to maintain forever, and it is the fastest way for this
 practice to start costing more than it returns.
 
-Report the path and list which states you drew.
+Report the path and the numbered states you drew, as `§1 empty`, `§2 conflict`
+— that list is what the spec's tier C criteria are then written against.
