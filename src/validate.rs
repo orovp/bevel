@@ -5,7 +5,7 @@
 //! exit code instead of an opinion.
 
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::project::Project;
 use crate::spec::{self, Criterion, DispositionAction, Spec, Status};
@@ -54,25 +54,35 @@ pub fn validate(project: &Project, spec: &Spec) -> Result<Vec<Finding>> {
         });
     }
 
-    findings.extend(check_tier_a_tests_exist(spec)?);
+    findings.extend(check_tier_a_tests_exist(project, spec)?);
     findings.extend(check_supersessions(project, spec)?);
     Ok(findings)
 }
 
-/// Every tier A criterion must name a test that actually exists in an
-/// `acceptance.*` file.
+/// Every tier A criterion must name a test that actually exists.
 ///
 /// A substring match rather than a parse, deliberately: the same rule then
 /// works for `fn name()`, `test.todo('name')` and `xit('name')` without the
 /// bevel needing a parser per language.
-fn check_tier_a_tests_exist(spec: &Spec) -> Result<Vec<Finding>> {
+///
+/// Where it looks depends on the status, because the artifact genuinely moves.
+/// Until the spec is claimed the tests live in the spec folder; task zero of
+/// every plan then relocates them into the package that will own them. Looking
+/// only in the spec folder after that reports a file that was moved on purpose
+/// as a missing one — which made `bevel validate` fail on every spec that had
+/// ever been implemented.
+fn check_tier_a_tests_exist(project: &Project, spec: &Spec) -> Result<Vec<Finding>> {
     let names = spec.tier_a_tests();
     if names.is_empty() {
         return Ok(Vec::new());
     }
+    let relocated = matches!(
+        spec.front.status,
+        Status::Implementing | Status::Done | Status::Superseded
+    );
 
     let files = spec.acceptance_files()?;
-    if files.is_empty() {
+    if files.is_empty() && !relocated {
         return Ok(vec![Finding {
             rule: "acceptance/file",
             message: format!(
@@ -92,9 +102,14 @@ fn check_tier_a_tests_exist(spec: &Spec) -> Result<Vec<Finding>> {
     Ok(names
         .iter()
         .filter(|n| !haystack.contains(**n))
+        .filter(|n| !relocated || locate(project, n).is_none())
         .map(|n| Finding {
             rule: "acceptance/missing-test",
-            message: format!("tier A criterion `{n}` has no matching test in acceptance.*"),
+            message: if relocated {
+                format!("tier A criterion `{n}` has no matching test anywhere in the repo")
+            } else {
+                format!("tier A criterion `{n}` has no matching test in acceptance.*")
+            },
         })
         .collect())
 }
@@ -186,6 +201,32 @@ pub fn pending_markers(root: &Path, spec_id: &str) -> usize {
     count
 }
 
+/// Where a named acceptance test actually lives, with its line.
+///
+/// The review report needs this because `/implement` relocates `acceptance.*`
+/// out of the spec folder into whichever package the plan chose, and "which
+/// package did this criterion end up in?" is the first thing a reviewer asks.
+///
+/// `specs/` is excluded, and that exclusion is the whole correctness of this
+/// function: every spec names its own tier A tests in frontmatter, so a search
+/// that included the spec folder would find the *declaration* of the name and
+/// report the contract as its own evidence.
+pub fn locate(project: &Project, needle: &str) -> Option<(PathBuf, usize)> {
+    let specs = project.specs_dir();
+    let mut hit = None;
+    walk(&project.root, 0, &mut |path| {
+        if hit.is_some() || path.starts_with(&specs) {
+            return;
+        }
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if let Some(n) = text.lines().position(|l| l.contains(needle)) {
+                hit = Some((path.to_path_buf(), n + 1));
+            }
+        }
+    });
+    hit
+}
+
 const SKIP_DIRS: [&str; 6] = [".git", "target", "node_modules", "dist", ".venv", ".bevel"];
 
 fn walk(dir: &Path, depth: usize, f: &mut impl FnMut(&Path)) {
@@ -195,7 +236,12 @@ fn walk(dir: &Path, depth: usize, f: &mut impl FnMut(&Path)) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    for entry in entries.flatten() {
+    // Sorted rather than in `read_dir` order: `locate` reports the first hit,
+    // and a report that names a different file on each machine is worse than
+    // no report.
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         if path.is_dir() {
@@ -300,6 +346,56 @@ mod tests {
         .unwrap();
         let spec = Spec::load(&dir).unwrap();
         assert!(validate(&p, &spec).unwrap().is_empty());
+    }
+
+    #[test]
+    fn relocating_the_acceptance_file_does_not_make_the_spec_invalid() {
+        let (_t, p) = project();
+        let dir = write_spec(
+            &p,
+            "0007",
+            "example",
+            "acceptance:\n- tier: A\n  test: conflict_prefers_local\n",
+        );
+        let mut spec = Spec::load(&dir).unwrap();
+        spec.front.status = Status::Implementing;
+        spec.save().unwrap();
+        let spec = Spec::load(&dir).unwrap();
+
+        // Relocated, exactly as task zero of the plan does it.
+        let tests = p.root.join("crates/core/tests");
+        std::fs::create_dir_all(&tests).unwrap();
+        std::fs::write(
+            tests.join("acceptance_0007.rs"),
+            "#[test]\nfn conflict_prefers_local() { assert!(true) }\n",
+        )
+        .unwrap();
+        assert!(validate(&p, &spec).unwrap().is_empty());
+
+        // Deleted rather than moved is still a finding.
+        std::fs::remove_file(tests.join("acceptance_0007.rs")).unwrap();
+        let f = validate(&p, &spec).unwrap();
+        assert!(
+            f.iter().any(|f| f.rule == "acceptance/missing-test"),
+            "{f:?}"
+        );
+    }
+
+    #[test]
+    fn a_relocated_acceptance_test_can_still_be_located() {
+        let (_t, p) = project();
+        let pkg = p.root.join("crates/core/tests");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("acceptance_0007.rs"),
+            "#[test]\nfn conflict_prefers_local() { assert!(true) }\n",
+        )
+        .unwrap();
+
+        let (path, line) = locate(&p, "conflict_prefers_local").unwrap();
+        assert!(path.ends_with("crates/core/tests/acceptance_0007.rs"));
+        assert_eq!(line, 2);
+        assert!(locate(&p, "no_such_test_anywhere").is_none());
     }
 
     #[test]
