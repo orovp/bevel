@@ -5,7 +5,6 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 
 use crate::paths::Layers;
 
@@ -141,7 +140,7 @@ pub fn api_key(cfg: &Context7) -> (Option<String>, KeySource) {
 }
 
 fn run_key_command(cmd: &str) -> Option<String> {
-    let out = Command::new("sh").arg("-c").arg(cmd).output().ok()?;
+    let out = crate::shell::command(cmd).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -182,10 +181,14 @@ mod tests {
         assert_eq!(cfg.context7.timeout_secs, 5);
     }
 
+    /// `echo` rather than `printf`, because this line is handed to whatever
+    /// shell the platform has: cmd.exe knows neither `printf` nor single
+    /// quotes. What it must still prove is that the trailing newline never
+    /// reaches an HTTP header — a `\r\n` one on Windows.
     #[test]
     fn a_key_command_is_run_and_trimmed() {
         let cfg = Context7 {
-            key_command: Some("printf '  secret-value  \\n'".into()),
+            key_command: Some("echo   secret-value  ".into()),
             ..Default::default()
         };
         std::env::remove_var("CONTEXT7_API_KEY");

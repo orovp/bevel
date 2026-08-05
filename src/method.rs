@@ -15,7 +15,6 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::config::Method as MethodConfig;
 use crate::paths::Layers;
@@ -174,49 +173,36 @@ pub fn fetch(
         "https://codeload.github.com/{}/tar.gz/{}",
         cfg.repo, git_ref
     );
-    let staging = dest.with_extension("incoming");
-    let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&staging)
-        .with_context(|| format!("cannot create {}", staging.display()))?;
-    let tarball = staging.join("method.tar.gz");
-
-    let out = Command::new("curl")
-        .args(["-sSL", "--fail", "--max-time"])
-        .arg(timeout_secs.to_string())
-        .arg("-o")
-        .arg(&tarball)
-        .arg(&url)
-        .output()
-        .context("could not run curl — it is required to fetch the method")?;
-    if !out.status.success() {
-        let _ = std::fs::remove_dir_all(&staging);
-        bail!(
-            "could not download {url}\n  {}\n  \
+    // Downloaded before the staging directory exists, so that a failed request
+    // leaves nothing behind at all.
+    let timeout = std::time::Duration::from_secs(timeout_secs.into());
+    let response = crate::http::get(&url, timeout, None).map_err(|e| {
+        anyhow::anyhow!(
+            "could not download {url}\n  {e}\n  \
              Check the repo and ref, or point at a local checkout with \
              `[method] path` in {}",
-            String::from_utf8_lossy(&out.stderr).trim(),
+            layers.config_file().display()
+        )
+    })?;
+    if response.status != 200 {
+        bail!(
+            "could not download {url}\n  http {}\n  \
+             Check the repo and ref, or point at a local checkout with \
+             `[method] path` in {}",
+            response.status,
             layers.config_file().display()
         );
     }
 
-    // --strip-components=1 drops the `<repo>-<ref>` wrapper directory, whose
-    // exact name depends on how the ref was written.
-    let out = Command::new("tar")
-        .arg("-xzf")
-        .arg(&tarball)
-        .arg("-C")
-        .arg(&staging)
-        .arg("--strip-components=1")
-        .output()
-        .context("could not run tar")?;
-    if !out.status.success() {
+    let staging = dest.with_extension("incoming");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging)
+        .with_context(|| format!("cannot create {}", staging.display()))?;
+
+    if let Err(e) = crate::archive::extract_tar_gz(&response.body, &staging) {
         let _ = std::fs::remove_dir_all(&staging);
-        bail!(
-            "could not extract the method archive: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        return Err(e.context(format!("could not extract {url}")));
     }
-    let _ = std::fs::remove_file(&tarball);
 
     if !staging.join(SENTINEL).is_file() {
         let _ = std::fs::remove_dir_all(&staging);

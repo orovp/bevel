@@ -10,17 +10,18 @@
 //! 4. **Offline is a supported mode, not an error path.** Nothing here is ever
 //!    on the critical path of a gate or a verification.
 //!
-//! HTTP goes through `curl` rather than a Rust client. That keeps a binary
-//! which is otherwise pure `std` free of a TLS stack — which also removes the
-//! usual musl friction — and this is an occasional, entirely optional call. A
-//! missing `curl` is simply another way to be offline, which is already a
-//! handled state.
+//! HTTP goes through `crate::http`, in-process. It went through `curl` first,
+//! to keep a TLS stack out of an otherwise pure-`std` binary and to keep musl
+//! easy; what that traded away was the machine — no `curl` on Windows before
+//! 10 1803, a cmdlet of the same name in PowerShell, and a user's `~/.curlrc`
+//! silently in the path of every request. Rule 4 above is what makes the trade
+//! affordable in the first place: a TLS handshake that fails is one more way to
+//! be offline, and offline is already a supported state here.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::config::{self, Context7};
 use crate::lockfile;
@@ -191,39 +192,14 @@ fn http_get(
         url.push_str(&format!("&topic={}", percent_encode(t)));
     }
 
-    let body_path = std::env::temp_dir().join(format!("bevel-docs-{}.txt", std::process::id()));
-    let mut cmd = Command::new("curl");
-    cmd.arg("-sS")
-        .arg("--max-time")
-        .arg(cfg.timeout_secs.to_string())
-        .arg("--retry")
-        .arg("1")
-        .arg("-o")
-        .arg(&body_path)
-        .arg("-w")
-        .arg("%{http_code}");
-    if let Some(k) = key {
-        cmd.arg("-H").arg(format!("Authorization: Bearer {k}"));
+    let timeout = std::time::Duration::from_secs(cfg.timeout_secs.into());
+    let response = crate::http::get(&url, timeout, key)?;
+    if response.status != 200 {
+        return Err(format!("http {}", response.status));
     }
-    cmd.arg(&url);
-
-    let out = match cmd.output() {
-        Ok(o) => o,
-        Err(e) => return Err(format!("curl unavailable: {e}")),
-    };
-    let status = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let body = std::fs::read_to_string(&body_path).unwrap_or_default();
-    let _ = std::fs::remove_file(&body_path);
-
-    if !out.status.success() {
-        return Err(format!(
-            "network error: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    if status != "200" {
-        return Err(format!("http {status}"));
-    }
+    // Documentation is text by request (`type=txt`); anything that is not is a
+    // proxy's error page, and treating it as content would poison the cache.
+    let body = String::from_utf8(response.body).map_err(|_| "answer was not text".to_string())?;
     if body.trim().len() < MIN_USEFUL_BYTES {
         return Err("no content for this library".into());
     }

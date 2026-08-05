@@ -254,10 +254,14 @@ pub fn pause(spec: &mut Spec) -> Result<()> {
     spec.save()
 }
 
+/// Who to record against an approval. `USERNAME` is Windows' spelling of the
+/// same thing, and without it every gate on that platform is signed `unknown`,
+/// which is worse than useless in a file two machines share.
 fn whoami() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_else(|_| "unknown".into())
+    ["USER", "LOGNAME", "USERNAME"]
+        .into_iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty()))
+        .unwrap_or_else(|| "unknown".into())
 }
 
 #[cfg(test)]

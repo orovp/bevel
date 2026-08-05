@@ -5,7 +5,6 @@
 
 use anyhow::{Context, Result};
 use std::path::Path;
-use std::process::Command;
 
 use crate::affected::Scope;
 use crate::packs::Pack;
@@ -64,9 +63,7 @@ pub fn run(
             let command = step.command(pack.package_arg(), &scoped_names);
             println!("  → [{}/{}] {command}", pack.id, step.name);
 
-            let status = Command::new("sh")
-                .arg("-c")
-                .arg(&command)
+            let status = crate::shell::command(&command)
                 .current_dir(root)
                 .status()
                 .with_context(|| format!("could not run `{command}`"))?;
@@ -153,7 +150,7 @@ mod tests {
     #[test]
     fn a_passing_step_summarises_cleanly() {
         let tmp = tempfile::tempdir().unwrap();
-        let packs = vec![pack("x", Ecosystem::Cargo, "true")];
+        let packs = vec![pack("x", Ecosystem::Cargo, "exit 0")];
         let r = run(tmp.path(), &packs, &[], &Scope::Full("all".into()), None).unwrap();
         assert!(r[0].ok());
         assert_eq!(summarise(&r), "1 checks passed");
@@ -162,9 +159,11 @@ mod tests {
     #[test]
     fn scoping_only_hands_a_pack_packages_from_its_own_ecosystem() {
         let tmp = tempfile::tempdir().unwrap();
+        // `echo`, because the scoped form appends package arguments and both
+        // shells have to accept them without complaining.
         let packs = vec![
-            pack("rust", Ecosystem::Cargo, "true"),
-            pack("ts", Ecosystem::Npm, "true"),
+            pack("rust", Ecosystem::Cargo, "echo"),
+            pack("ts", Ecosystem::Npm, "echo"),
         ];
         let packages = vec![
             entry("core", Ecosystem::Cargo),
@@ -183,8 +182,8 @@ mod tests {
     fn only_filters_to_a_single_pack() {
         let tmp = tempfile::tempdir().unwrap();
         let packs = vec![
-            pack("rust", Ecosystem::Cargo, "true"),
-            pack("ts", Ecosystem::Npm, "true"),
+            pack("rust", Ecosystem::Cargo, "exit 0"),
+            pack("ts", Ecosystem::Npm, "exit 0"),
         ];
         let r = run(
             tmp.path(),

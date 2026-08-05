@@ -21,13 +21,19 @@ path = "src/main.rs"
 anyhow = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.5", features = ["derive"] }
-# Only for restoring the default SIGPIPE disposition; already in the tree via chrono.
-libc = "0.2"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 sha2 = "0.10"
+tar = { version = "0.4", default-features = false }
 toml = "0.8"
+ureq = "3"
+
+# Only for restoring the default SIGPIPE disposition, which is a signal that
+# does not exist on Windows; already in the tree via chrono.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

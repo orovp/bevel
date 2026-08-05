@@ -5,4 +5,4 @@ precise here, that is what shaping is for.
 
 Add with `bevel inbox add "..."`, shape with `bevel shape <n>`.
 
-- Intentar encontrar donde seria interesante que el agente genere html en lugar de markdown
+- Hacer el harness multi agente, el primero a ser adaptado opencode. Intentar usar una solución de mapeo por tipo de recursos harness y un mapeador para cada agente.

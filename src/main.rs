@@ -585,11 +585,7 @@ fn cmd_fmt(args: FmtArgs) -> Result<ExitCode> {
             continue;
         };
         let Some(fix) = &step.fix else { continue };
-        let status = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(fix)
-            .current_dir(&p.root)
-            .status();
+        let status = bevel::shell::command(fix).current_dir(&p.root).status();
         // A formatter that is not installed must not fail a write.
         if let Ok(s) = status {
             if !s.success() {

@@ -10,7 +10,15 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Windows is here because nothing else can see it. The paths, the shell and
+    # the archive extraction all have a second behaviour there, and a laptop
+    # cross-compiling to `*-windows-msvc` cannot even link, let alone run the
+    # tests — so an untested platform would go back to being broken quietly.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -26,6 +34,9 @@ jobs:
       # grows past its limit this fails, and the fix is deletion rather than a
       # bigger limit — see DESIGN.md §13.
       - name: context budget
+        # One script for both runners: the Windows image has bash, and its exec
+        # layer resolves `bevel` to `bevel.exe` on its own.
+        shell: bash
         run: |
           cargo build
           ./target/debug/bevel project init || true

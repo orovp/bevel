@@ -10,10 +10,12 @@
 //!   layers; those hold the method only.
 
 pub mod affected;
+pub mod archive;
 pub mod config;
 pub mod context;
 pub mod docs;
 pub mod gate;
+pub mod http;
 pub mod inbox;
 pub mod index;
 pub mod lifecycle;
@@ -23,6 +25,7 @@ pub mod migrate;
 pub mod packs;
 pub mod paths;
 pub mod project;
+pub mod shell;
 pub mod spec;
 pub mod summary;
 pub mod sync;
