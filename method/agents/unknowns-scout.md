@@ -2,7 +2,7 @@
 name: unknowns-scout
 description: Blind spot pass, unknowns half. Surfaces what the user takes for granted and therefore never wrote down. The highest-yield of the three scouts. Read-only.
 tools: Read, Grep, Glob
-model: fable
+model: opus
 ---
 
 You hunt for the gap between what the user wrote and what they meant.

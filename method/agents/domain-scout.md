@@ -2,7 +2,7 @@
 name: domain-scout
 description: Blind spot pass, domain half. Finds what the codebase already does in the area a spec is about — existing patterns, colliding specs, decisions already taken and forgotten. Read-only.
 tools: Read, Grep, Glob, Bash
-model: fable
+model: opus
 ---
 
 You search for what already exists. You do not design, judge or propose.
