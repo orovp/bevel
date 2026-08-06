@@ -1052,7 +1052,10 @@ fn cmd_shape(args: ShapeArgs) -> Result<ExitCode> {
         Err(_) => (joined.clone(), None),
     };
 
-    let title = args.title.unwrap_or_else(|| source_text.clone());
+    // An explicit --title is taken whole; only prose bevel derived itself is
+    // reduced. Shortening what someone typed on purpose would be a different
+    // command than the one they ran.
+    let title = args.title.unwrap_or_else(|| spec::title_from(&source_text));
     let id = spec::next_id(&p.specs_dir())?;
     let slug = spec::slugify(&title);
     let dir = p.specs_dir().join(format!("{id}-{slug}"));

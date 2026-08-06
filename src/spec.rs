@@ -326,6 +326,50 @@ pub fn slugify(text: &str) -> String {
     }
 }
 
+/// How long a derived title may be before it stops being a title.
+///
+/// It lands in an H1, a `bevel list` row and a `specs/README.md` table cell.
+/// Seventy-two keeps the row under eighty once the id is prefixed.
+const TITLE_MAX: usize = 72;
+
+/// A spec title from inbox prose: the first sentence, capped at a word.
+///
+/// An inbox item is a paragraph, deliberately — capture is meant to be cheap,
+/// so it holds the whole thought including the reasoning. A title is a line.
+/// Using the paragraph whole made the H1, the listing and the index table
+/// unreadable at once, and `slugify` already takes six words for the directory
+/// name, so the title was the one place the paragraph survived intact.
+///
+/// Nothing is lost by shortening it: `{{source}}` puts the full item in the
+/// body under "From the inbox", which is where the reasoning belongs.
+///
+/// A sentence ends at a full stop *followed by a space*, so `spec.md prose`
+/// and `src/*.rs that` do not end one. An explicit `--title` never comes here.
+pub fn title_from(text: &str) -> String {
+    let text = text.trim();
+    let sentence = match text.find(". ") {
+        Some(i) => &text[..=i],
+        None => text,
+    };
+    let sentence = sentence.trim_end_matches('.').trim();
+    if sentence.chars().count() <= TITLE_MAX {
+        return sentence.to_string();
+    }
+    // Cut at a word boundary, never mid-word and never mid-character.
+    let cut = sentence
+        .char_indices()
+        .take_while(|(i, _)| *i <= TITLE_MAX)
+        .filter(|(_, c)| c.is_whitespace())
+        .map(|(i, _)| i)
+        .last();
+    match cut {
+        Some(i) => sentence[..i].trim_end().to_string(),
+        // One word longer than the cap. Truncating it would invent a word, so
+        // the whole word survives and the cap gives way.
+        None => sentence.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +416,41 @@ mod tests {
             "one-two-three-four-five-six"
         );
         assert_eq!(slugify("   "), "untitled");
+    }
+
+    /// An inbox item is a paragraph on purpose. A title is a line, and it was
+    /// the one place the paragraph survived whole — `slugify` already bounded
+    /// the directory name, so an unreadable H1 and a wrapped index table were
+    /// the only visible symptoms until one of them broke the YAML outright.
+    #[test]
+    fn a_title_derived_from_inbox_prose_is_one_readable_line() {
+        // The item that surfaced this. Note the abbreviations: a full stop only
+        // ends a sentence when a space follows, or this would stop at `spec.md`.
+        let item = "bevel close counts phantom pending markers: pending_markers \
+                    searches spec.md prose and fixtures in src/*.rs too. Its \
+                    sibling locate() already excludes specs/ for this reason.";
+        let title = title_from(item);
+        assert!(title.chars().count() <= TITLE_MAX, "{title}");
+        assert!(title.starts_with("bevel close counts phantom"));
+        assert!(!title.contains("Its sibling"), "kept a second sentence");
+        // Cut at a space, so the last word is a whole word.
+        assert!(!item[title.len()..].starts_with(|c: char| c.is_alphanumeric()));
+
+        // Short prose is left exactly as it is, minus the full stop it does not
+        // need in a heading.
+        assert_eq!(title_from("Add a sync button."), "Add a sync button");
+        assert_eq!(title_from("  Add a sync button  "), "Add a sync button");
+
+        // One word longer than the cap: truncating would invent a word that is
+        // not in the item, so the cap gives way instead.
+        let long = "s".repeat(TITLE_MAX + 10);
+        assert_eq!(title_from(&long), long);
+
+        // Multi-byte input must not be split mid-character.
+        let accented = "cañón ".repeat(30);
+        let t = title_from(&accented);
+        assert!(t.chars().count() <= TITLE_MAX, "{t}");
+        assert!(accented.starts_with(&t));
     }
 
     #[test]
