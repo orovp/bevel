@@ -60,13 +60,13 @@ pub fn build(project: &Project) -> Result<Board> {
             superseded += 1;
             continue;
         }
-        let tier_a = s.tier_a_tests().len();
-        let pending = validate::pending_markers(&project.root, &s.front.id);
+        let p = validate::progress(project, &s);
+        let tier_a = p.total;
         cards.push(Card {
             age: chrono::NaiveDate::parse_from_str(&s.front.created, "%Y-%m-%d")
                 .ok()
                 .map(|d| (today - d).num_days()),
-            live: tier_a.saturating_sub(pending),
+            live: p.live,
             tier_a,
             tier_b: count(&s, 'B'),
             tier_c: count(&s, 'C'),
@@ -300,11 +300,20 @@ mod tests {
             "0001",
             Status::Implementing,
             "2026-08-01",
-            "- tier: A\n  test: one\n- tier: A\n  test: two\n",
+            "- tier: A\n  test: sync_keeps_the_local_edit\n\
+              - tier: A\n  test: sync_reports_a_conflict\n",
         );
         std::fs::write(
             s.dir.join("acceptance.rs"),
-            "#[ignore = \"acceptance: 0001 pending\"]\nfn two() {}\nfn one() {}\n",
+            // Bodies and a blank line between them, because the window is
+            // positional: it reaches three lines back whatever is in them, so
+            // two one-line tests in a row both read as marked.
+            "#[ignore = \"acceptance: 0001 pending\"]\n\
+             fn sync_reports_a_conflict() {\n\
+             todo!()\n\
+             }\n\
+             \n\
+             fn sync_keeps_the_local_edit() {}\n",
         )
         .unwrap();
         assert!(render(&build(&p).unwrap())

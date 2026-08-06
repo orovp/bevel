@@ -508,9 +508,17 @@ that wants to ask without claiming.
 
 **Pausing.** `bevel pause <id>` returns the spec to `approved`. The hash is untouched, so
 resuming needs no re-approval. Nothing is lost by pausing because **progress was never stored in
-the status** — it is the count of remaining pending markers in the acceptance tests (§7). A
-half-finished spec reports `4/7 criteria live` whether it is active or paused, and that number is
-recomputed from the code rather than remembered.
+the status** — it is the state of each tier A criterion the spec declares, read back from the
+code (§7). A half-finished spec reports `4/7 criteria live` whether it is active or paused, and
+that number is recomputed rather than remembered.
+
+The question is asked of the spec, not of the repository, and that is load-bearing. Counting how
+many times the marker string appears anywhere under the root counted a spec's own prose
+explaining the convention, and test fixtures using a real id as sample data — bevel did this to
+itself and refused to close spec 0001 over four markers that were not markers. Bounding the
+search by what the frontmatter declares makes both impossible rather than merely unlikely, and
+makes `live + pending + missing` equal the declared total, which two counts from two sources
+never did.
 
 **What the rule does not block.** The constraint binds `/implement`, not your keyboard. The
 `chore` fast path (§8) stays available while a spec is active — otherwise a one-line fix
@@ -896,16 +904,23 @@ judged. Deviations in `notes.md` resolve one of three ways: fixed, or they amend
 which **breaks the hash and forces re-approval**, the correct behavior — or they become new
 `INBOX.md` items.
 
-Closing requires **zero remaining `acceptance: 0007` pending markers** (§7). An agent cannot
-declare done while a named criterion is still ignored, and because the markers are countable,
+Closing requires **every declared tier A criterion to be live** (§7): its test found, and no
+`acceptance: 0007 pending` marker on it. An agent cannot
+declare done while a named criterion is still ignored, and because the criteria are countable,
 `bevel status` can show partial progress as `5/7 criteria live` instead of a self-reported
 percentage. Then `status: done` and the commit SHA lands in `gates.lock`.
 
 That last step is `bevel close <id>`, and it is a command rather than an edit for the same reason
 approval is: **the status is the enforcement point, so nothing that the status gates may be free
-to write it.** `close` re-runs verification, refuses while any pending marker remains, refuses if
-the spec was amended after approval, and refuses on Tier C until a human has confirmed the
-checklist in a terminal. An agent editing `status: done` by hand would bypass all four at once.
+to write it.** `close` re-runs verification, refuses while a declared criterion still carries its
+marker, refuses when a criterion names a test that exists nowhere, refuses if the spec was amended
+after approval, and refuses on Tier C until a human has confirmed the checklist in a terminal. An
+agent editing `status: done` by hand would bypass all five at once.
+
+The second of those is the one the marker count could not see at all: a spec whose tier A tests
+were never written has no markers, so it read as nothing left to do. No test is not a passing
+test — it is a criterion that passes by never running, which is the failure this whole tier
+exists to prevent.
 
 ### Depth, and why there is no `--quick` flag
 
@@ -1250,8 +1265,8 @@ not the CLI's language — it is **turning judgments into exit codes**:
 | "what ID should I use?" | The CLI reserves it |
 | "which version of Tokio?" | Read from `Cargo.lock` |
 | "which packages did I touch?" | `git diff` → workspace map |
-| "am I done?" | Zero pending markers + Tier A/B green |
-| "how far along am I?" | `5/7 criteria live`, counted from markers |
+| "am I done?" | Every declared tier A criterion live + Tier A/B green |
+| "how far along am I?" | `5/7 criteria live`, counted from the declared criteria |
 
 Every row is one fewer opportunity for the model to hallucinate something plausible.
 

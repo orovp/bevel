@@ -290,17 +290,137 @@ pub fn promote_if_clean(spec: &mut Spec, findings: &[Finding]) -> Result<bool> {
     Ok(false)
 }
 
-/// Count of pending acceptance markers for a spec, searched across the repo so
-/// the number stays right after `/implement` relocates the file into a package.
-pub fn pending_markers(root: &Path, spec_id: &str) -> usize {
-    let needle = format!("acceptance: {spec_id} pending");
-    let mut count = 0;
-    walk(root, 0, &mut |path| {
+/// What one declared tier A criterion is, right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    /// The test exists and no longer carries its pending marker.
+    Live,
+    /// The test exists and its marker is still on it.
+    Inert,
+    /// No test of that name anywhere the search can see.
+    Missing,
+}
+
+/// Every declared tier A criterion of a spec, and what each one is.
+///
+/// **The question is asked of the spec, not of the repository.** The count this
+/// replaced searched the whole tree for the marker string and returned how many
+/// times it appeared, which counted a spec's own prose explaining the
+/// convention and a test fixture using a real id as sample data. Neither is a
+/// criterion. Bounding the search by what the frontmatter declares makes both
+/// impossible rather than merely unlikely, and makes `live + inert + missing`
+/// equal `total` — two numbers that used to come from different sources, so
+/// the pending one could exceed the declared one.
+///
+/// Three things about how it looks, each of which was a bug in an earlier
+/// attempt at this:
+///
+/// **The spec folder is consulted first.** `locate` excludes `specs/` for its
+/// own good reasons, but a spec is `implementing` from `bevel start`, which is
+/// before task zero of the plan relocates `acceptance.*` into a package. Asking
+/// only the rest of the repo reports every criterion `Missing` for that whole
+/// window. `7f2dedf` fixed exactly this in `check_tier_a_tests_exist`, where it
+/// was a warning; here it would be a gate.
+///
+/// **Every occurrence counts, not the first.** `walk` sorts by name, so
+/// root-level `AGENTS.md`, `DESIGN.md` and `INBOX.md` are read before `src/`.
+/// Resolving a criterion to the first file mentioning its name would let prose
+/// stand in for the test, find no marker beside it, and report the criterion
+/// live — this bug returning through the door left open for it. A criterion is
+/// `Inert` if *any* occurrence carries the marker, which fails toward blocking.
+///
+/// **One walk, not one per criterion.** `bevel pending` is the `Stop` hook and
+/// `bevel status --brief` the `SessionStart` hook, so this runs on the agent's
+/// critical path every turn.
+pub fn criteria_state(project: &Project, spec: &Spec) -> Vec<(String, State)> {
+    let names = spec.tier_a_tests();
+    if names.is_empty() {
+        return Vec::new();
+    }
+    let marker = format!("acceptance: {} pending", spec.front.id);
+
+    // The spec folder, which the walk below deliberately cannot see.
+    let mut texts: Vec<String> = spec
+        .acceptance_files()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|f| std::fs::read_to_string(f).ok())
+        .collect();
+
+    let specs = project.specs_dir();
+    walk(&project.root, 0, &mut |path| {
+        if path.starts_with(&specs) {
+            return;
+        }
         if let Ok(text) = std::fs::read_to_string(path) {
-            count += text.matches(&needle).count();
+            if names.iter().any(|n| text.contains(n)) {
+                texts.push(text);
+            }
         }
     });
-    count
+
+    names
+        .iter()
+        .map(|name| {
+            let found: Vec<&String> = texts.iter().filter(|t| t.contains(name)).collect();
+            let state = if found.is_empty() {
+                State::Missing
+            } else if found.iter().any(|t| marker_near(t, name, &marker)) {
+                State::Inert
+            } else {
+                State::Live
+            };
+            ((*name).to_string(), state)
+        })
+        .collect()
+}
+
+/// Is the marker on this test, rather than merely somewhere in the same file?
+///
+/// The marker sits on the attribute line directly above the test in Rust and on
+/// the test's own line in the TypeScript forms, so a small window above and
+/// including the name covers every pack template. A blank-line-delimited block
+/// was tried and is worse: a closing `}` is not blank, so for two adjacent
+/// tests the block above the second walks up through the first and picks up its
+/// marker.
+fn marker_near(text: &str, test: &str, marker: &str) -> bool {
+    const WINDOW: usize = 3;
+    let lines: Vec<&str> = text.lines().collect();
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.contains(test))
+        .any(|(at, _)| {
+            lines[at.saturating_sub(WINDOW)..=at]
+                .iter()
+                .any(|l| l.contains(marker))
+        })
+}
+
+/// A spec's progress, for the commands that report a number rather than a list.
+///
+/// `live + inert + missing.len() == total` by construction, which is what makes
+/// the `saturating_sub` these call sites used to carry unnecessary.
+pub struct Progress {
+    pub total: usize,
+    pub live: usize,
+    pub inert: usize,
+    /// Named, because "write this test" needs to say which.
+    pub missing: Vec<String>,
+}
+
+pub fn progress(project: &Project, spec: &Spec) -> Progress {
+    let states = criteria_state(project, spec);
+    Progress {
+        total: states.len(),
+        live: states.iter().filter(|(_, s)| *s == State::Live).count(),
+        inert: states.iter().filter(|(_, s)| *s == State::Inert).count(),
+        missing: states
+            .iter()
+            .filter(|(_, s)| *s == State::Missing)
+            .map(|(n, _)| n.clone())
+            .collect(),
+    }
 }
 
 /// Where a named acceptance test actually lives, with its line.
@@ -635,22 +755,187 @@ mod tests {
         assert_eq!(Spec::load(&dir).unwrap().front.status, Status::Review);
     }
 
+    /// Two markers on one criterion are one criterion. The count this replaced
+    /// returned 2 here and would have blocked a close twice over for one piece
+    /// of unfinished work.
     #[test]
-    fn pending_markers_are_counted_across_the_repo() {
+    fn one_criterion_with_two_markers_is_one_pending_criterion() {
+        let (_t, p) = project();
+        let dir = write_spec(&p, "0007", "example", "acceptance:\n- tier: A\n  test: a\n");
+        std::fs::write(
+            dir.join("acceptance.rs"),
+            "#[ignore = \"acceptance: 0007 pending\"]\n#[ignore = \"acceptance: 0007 pending\"]\nfn a() {}\n",
+        )
+        .unwrap();
+        let spec = Spec::load(&dir).unwrap();
+        assert_eq!(progress(&p, &spec).inert, 1);
+    }
+
+    // ---------------------------------------------------- acceptance: 0002
+
+    /// The reported bug, as a repository rather than as a count. A spec quoting
+    /// the marker syntax in its prose and a source fixture using a real id as
+    /// sample data are both matched by the text scan, and neither is a pending
+    /// criterion.
+    #[test]
+    fn a_marker_inside_prose_or_a_fixture_is_not_a_pending_criterion() {
         let (_t, p) = project();
         let dir = write_spec(
             &p,
             "0007",
             "example",
-            "acceptance:\n- tier: B\n  cmd: 'true'\n",
+            "acceptance:\n- tier: A\n  test: conflict_prefers_the_local_edit\n",
         );
         std::fs::write(
             dir.join("acceptance.rs"),
-            "#[ignore = \"acceptance: 0007 pending\"]\nfn a() {}\n\
-             #[ignore = \"acceptance: 0007 pending\"]\nfn b() {}\n",
+            "fn conflict_prefers_the_local_edit() {}\n",
         )
         .unwrap();
-        assert_eq!(pending_markers(&p.root, "0007"), 2);
-        assert_eq!(pending_markers(&p.root, "0008"), 0);
+
+        // Both shapes that produced the four phantom markers in this very
+        // repository: the spec explaining the convention in its own prose, and
+        // a source fixture using a live spec id as sample data.
+        std::fs::write(
+            dir.join("spec.md"),
+            format!(
+                "{}\n\nUntil `acceptance: 0007 pending` is gone the close is refused.\n",
+                std::fs::read_to_string(dir.join("spec.md")).unwrap()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            p.root.join("fixtures.rs"),
+            "let sample = \"#[ignore = \\\"acceptance: 0007 pending\\\"]\";\n",
+        )
+        .unwrap();
+
+        let spec = Spec::load(&dir).unwrap();
+        let prog = progress(&p, &spec);
+        assert_eq!(prog.inert, 0, "prose and a fixture were counted as pending");
+        assert_eq!(prog.live, 1);
+        assert!(prog.missing.is_empty());
+    }
+
+    /// The model, stated as the property it buys: pending is a fact about a
+    /// declared criterion, not a number of string occurrences. A marker naming
+    /// a criterion the frontmatter no longer declares is nobody's business.
+    #[test]
+    fn a_criterion_is_pending_only_while_its_own_test_carries_the_marker() {
+        let (_t, p) = project();
+        let dir = write_spec(
+            &p,
+            "0007",
+            "example",
+            "acceptance:\n- tier: A\n  test: conflict_prefers_the_local_edit\n",
+        );
+        std::fs::write(
+            dir.join("acceptance.rs"),
+            "#[ignore = \"acceptance: 0007 pending\"]\n\
+             fn conflict_prefers_the_local_edit() {\n    todo!()\n}\n\
+             \n\
+             #[ignore = \"acceptance: 0007 pending\"]\n\
+             fn a_helper_nobody_declared() {}\n",
+        )
+        .unwrap();
+
+        let spec = Spec::load(&dir).unwrap();
+        // Two markers in the file, one declared criterion, one blocker.
+        assert_eq!(progress(&p, &spec).inert, 1);
+
+        // Take the marker off the criterion and it is live, however many
+        // markers remain elsewhere in the same file.
+        std::fs::write(
+            dir.join("acceptance.rs"),
+            "fn conflict_prefers_the_local_edit() {\n    assert!(true)\n}\n\
+             \n\
+             #[ignore = \"acceptance: 0007 pending\"]\n\
+             fn a_helper_nobody_declared() {}\n",
+        )
+        .unwrap();
+        let prog = progress(&p, &spec);
+        assert_eq!((prog.live, prog.inert), (1, 0));
+    }
+
+    /// The window between `bevel start` and task zero, where the tests still
+    /// live in the spec folder and `locate` — which excludes `specs/` on
+    /// purpose — cannot see them. Searching with `locate` alone reports every
+    /// criterion missing and refuses the close for the whole of implementation.
+    /// `7f2dedf` fixed this shape of bug in `validate`; it must not return in
+    /// `close`.
+    #[test]
+    fn a_criterion_whose_test_has_not_been_relocated_yet_is_not_missing() {
+        let (_t, p) = project();
+        let dir = write_spec(
+            &p,
+            "0007",
+            "example",
+            // Status is irrelevant here on purpose: unlike
+            // `check_tier_a_tests_exist`, this looks in both places always. A
+            // test is a test wherever the plan has moved it to so far.
+            "acceptance:\n- tier: A\n  test: conflict_prefers_the_local_edit\n",
+        );
+        std::fs::write(
+            dir.join("acceptance.rs"),
+            "#[ignore = \"acceptance: 0007 pending\"]\n\
+             fn conflict_prefers_the_local_edit() {}\n",
+        )
+        .unwrap();
+
+        let spec = Spec::load(&dir).unwrap();
+        // `locate` cannot see it — that is correct and deliberate.
+        assert!(locate(&p, "conflict_prefers_the_local_edit").is_none());
+        // The criterion is still not missing: it is inert, in the spec folder.
+        let prog = progress(&p, &spec);
+        assert!(
+            prog.missing.is_empty(),
+            "an unrelocated test was called missing: {:?}",
+            prog.missing
+        );
+        assert_eq!(prog.inert, 1);
+    }
+
+    /// The bound that makes the four `saturating_sub` calls removable, stated
+    /// as the property that can actually fail: pending never exceeds the
+    /// declared criteria. `live <= total` cannot fail for any non-negative
+    /// pending and would license removing them without proving anything.
+    #[test]
+    fn pending_can_never_exceed_the_declared_criteria() {
+        let (_t, p) = project();
+        let dir = write_spec(
+            &p,
+            "0007",
+            "example",
+            "acceptance:\n- tier: A\n  test: conflict_prefers_the_local_edit\n",
+        );
+        // One criterion, and every way a repository can shout about it: the
+        // marker on the test, again on a helper, again in prose, again in a
+        // second file. The count this replaced returned four here, against a
+        // total of one.
+        std::fs::write(
+            dir.join("acceptance.rs"),
+            "#[ignore = \"acceptance: 0007 pending\"]\n\
+             fn conflict_prefers_the_local_edit() {\n    todo!()\n}\n\
+             \n\
+             #[ignore = \"acceptance: 0007 pending\"]\n\
+             fn helper() {}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("notes.md"), "still `acceptance: 0007 pending`\n").unwrap();
+        std::fs::write(
+            p.root.join("other.rs"),
+            "// acceptance: 0007 pending, in prose\n",
+        )
+        .unwrap();
+
+        let spec = Spec::load(&dir).unwrap();
+        let prog = progress(&p, &spec);
+        assert_eq!(prog.total, 1);
+        assert!(
+            prog.inert <= prog.total,
+            "{} pending against {} declared",
+            prog.inert,
+            prog.total
+        );
+        assert_eq!(prog.live + prog.inert + prog.missing.len(), prog.total);
     }
 }

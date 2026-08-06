@@ -741,14 +741,24 @@ fn cmd_pending() -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     };
     let s = spec::find(&p.specs_dir(), &id)?;
-    let total = s.tier_a_tests().len();
-    let remaining = validate::pending_markers(&p.root, &id);
+    let prog = validate::progress(&p, &s);
+    let total = prog.total;
 
-    if remaining > 0 {
+    if prog.inert > 0 || !prog.missing.is_empty() {
+        let mut what = Vec::new();
+        if prog.inert > 0 {
+            what.push(format!("{} pending", prog.inert));
+        }
+        // Named separately, because a criterion with no test does not fail
+        // loudly — it passes by never running.
+        if !prog.missing.is_empty() {
+            what.push(format!("{} with no test", prog.missing.len()));
+        }
         println!(
-            "spec {id} is still open: {}/{total} criteria live, {remaining} pending. \
+            "spec {id} is still open: {}/{total} criteria live, {}. \
              Run `bevel verify --affected`, then reconcile notes.md.",
-            total.saturating_sub(remaining)
+            prog.live,
+            what.join(" and ")
         );
     } else {
         println!("spec {id} has all {total} criteria live. Reconcile notes.md and close it.");
@@ -1291,13 +1301,9 @@ fn cmd_pause(args: IdArgs) -> Result<ExitCode> {
     let mut s = spec::find(&p.specs_dir(), &id)?;
     gate::pause(&mut s)?;
     index::write(&p)?;
-    let pending = validate::pending_markers(&p.root, &s.front.id);
-    let total = s.tier_a_tests().len();
+    let prog = validate::progress(&p, &s);
     println!("paused {} — approval intact, resume any time", s.front.id);
-    println!(
-        "  progress: {}/{total} criteria live",
-        total.saturating_sub(pending)
-    );
+    println!("  progress: {}/{} criteria live", prog.live, prog.total);
     Ok(ExitCode::SUCCESS)
 }
 

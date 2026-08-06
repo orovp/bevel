@@ -39,6 +39,13 @@ pub enum Blocker {
         remaining: usize,
         total: usize,
     },
+    /// Declared tier A criteria whose test is nowhere to be found.
+    ///
+    /// Separate from `Pending` because the repair is different — write the
+    /// test, rather than take the marker off it — and because this is the
+    /// failure the old marker count could not see at all: no test means no
+    /// marker, which read as nothing left to do.
+    MissingTest(Vec<String>),
     VerifyFailed,
     /// Tier C criteria exist and no human is present to judge them.
     NeedsHumanJudgement(Vec<String>),
@@ -59,6 +66,20 @@ impl Blocker {
                 "{remaining} of {total} acceptance criteria are still pending\n  \
                  fill in the test bodies and remove their `acceptance: {id} pending` markers"
             ),
+            Blocker::MissingTest(names) => {
+                let mut s = format!(
+                    "{} acceptance criteria name a test that does not exist:\n",
+                    names.len()
+                );
+                for n in names {
+                    s.push_str(&format!("  {n}\n"));
+                }
+                s.push_str(
+                    "  write them, or amend the spec if they are no longer the contract — \
+                     a criterion with no test passes by never running",
+                );
+                s
+            }
             Blocker::VerifyFailed => {
                 "verification failed — every tier A and B criterion must be green".to_string()
             }
@@ -103,10 +124,15 @@ pub fn blockers(
         out.push(Blocker::GateReopened);
     }
 
-    let total = spec.tier_a_tests().len();
-    let remaining = validate::pending_markers(&project.root, &spec.front.id);
-    if remaining > 0 {
-        out.push(Blocker::Pending { remaining, total });
+    let p = validate::progress(project, spec);
+    if p.inert > 0 {
+        out.push(Blocker::Pending {
+            remaining: p.inert,
+            total: p.total,
+        });
+    }
+    if !p.missing.is_empty() {
+        out.push(Blocker::MissingTest(p.missing));
     }
 
     if !verify_ok {
@@ -227,16 +253,26 @@ mod tests {
         assert!(b[0].explain("0001").contains("bevel start 0001"));
     }
 
+    /// The marker has to be *on the criterion*. It used to be enough for the
+    /// string to exist anywhere under the project root — this same test proved
+    /// that by putting it in `notes.md`, where no test has ever lived.
     #[test]
-    fn pending_markers_block_the_close() {
+    fn a_marker_on_the_criterion_blocks_the_close() {
         let (_t, p, dir) = setup(Status::Review, TIER_A);
         let mut spec = Spec::load(&dir).unwrap();
         gate::approve(&p, &mut spec, true).unwrap();
         start(&p, &mut spec).unwrap();
 
         std::fs::write(
+            dir.join("acceptance.rs"),
+            "#[ignore = \"acceptance: 0001 pending\"]\nfn does_the_thing() {}\n",
+        )
+        .unwrap();
+        // Loose in a document, it is prose about the convention and blocks
+        // nothing.
+        std::fs::write(
             dir.join("notes.md"),
-            "#[ignore = \"acceptance: 0001 pending\"]\n",
+            "we still owe `acceptance: 0001 pending` on the retry path\n",
         )
         .unwrap();
         let spec = Spec::load(&dir).unwrap();
@@ -314,5 +350,136 @@ mod tests {
             blockers(&p, &spec, false, true).unwrap(),
             vec![Blocker::VerifyFailed]
         );
+    }
+
+    // ---------------------------------------------------- acceptance: 0002
+
+    /// The false green this closes, and why it is a separate blocker: a spec
+    /// whose tier A tests were never written must not close, and the report
+    /// must say "no test" rather than folding it in with the ones merely
+    /// switched off.
+    #[test]
+    fn a_tier_a_criterion_with_no_test_anywhere_blocks_the_close_on_its_own() {
+        let (_t, p, dir) = setup(
+            Status::Review,
+            "acceptance:\n- tier: A\n  test: does_the_thing\n\
+             - tier: A\n  test: was_never_written_at_all\n",
+        );
+        let mut spec = Spec::load(&dir).unwrap();
+        gate::approve(&p, &mut spec, true).unwrap();
+        start(&p, &mut spec).unwrap();
+        let spec = Spec::load(&dir).unwrap();
+
+        // `setup` writes `does_the_thing` and nothing else, so one criterion is
+        // live and the other has no test at all. Under the marker count this
+        // was zero pending and a clean close.
+        let b = blockers(&p, &spec, true, true).unwrap();
+        assert_eq!(
+            b,
+            vec![Blocker::MissingTest(vec![
+                "was_never_written_at_all".to_string()
+            ])],
+            "a criterion with no test did not block the close"
+        );
+
+        // Distinguishable, not merely both present: the two failures have two
+        // repairs and the message has to name the right one.
+        let missing = b[0].explain("0001");
+        assert!(missing.contains("was_never_written_at_all"));
+        assert!(missing.contains("write them"), "{missing}");
+        let pending = Blocker::Pending {
+            remaining: 1,
+            total: 2,
+        }
+        .explain("0001");
+        assert!(pending.contains("remove their"), "{pending}");
+        assert!(
+            !pending.contains("write them"),
+            "the two blockers read the same"
+        );
+    }
+
+    /// The unification, and the only criterion that pins the call sites. Every
+    /// command that answers "is this criterion done?" must answer the same for
+    /// the same spec — `close`, `status`, `pending`, `pause`, the board and
+    /// `review`. Without this, an implementation can satisfy every other
+    /// criterion against one new function and leave five callers on the old
+    /// count.
+    #[test]
+    fn every_command_reports_the_same_state_for_the_same_criterion() {
+        let (_t, p, dir) = setup(
+            Status::Review,
+            "acceptance:\n- tier: A\n  test: does_the_thing\n\
+             - tier: A\n  test: also_does_the_other_thing\n",
+        );
+        let mut spec = Spec::load(&dir).unwrap();
+        gate::approve(&p, &mut spec, true).unwrap();
+        start(&p, &mut spec).unwrap();
+
+        // One criterion live, one still carrying its marker — and a repository
+        // shouting the marker string from places that are not a criterion:
+        // the spec's own prose, and a source fixture using a live id.
+        std::fs::write(
+            dir.join("acceptance.rs"),
+            "fn does_the_thing() {\n    assert!(true)\n}\n\
+             \n\
+             #[ignore = \"acceptance: 0001 pending\"]\n\
+             fn also_does_the_other_thing() {\n    todo!()\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("notes.md"),
+            "we owe `acceptance: 0001 pending` on two more paths\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.root.join("fixtures.rs"),
+            "let sample = \"acceptance: 0001 pending\";\n",
+        )
+        .unwrap();
+        let spec = Spec::load(&dir).unwrap();
+
+        // The one answer: two criteria, one live, one inert, none missing.
+        let prog = validate::progress(&p, &spec);
+        assert_eq!((prog.total, prog.live, prog.inert), (2, 1, 1));
+        assert!(prog.missing.is_empty());
+
+        // `close`, from the blocker it raises.
+        assert_eq!(
+            blockers(&p, &spec, true, true).unwrap(),
+            vec![Blocker::Pending {
+                remaining: 1,
+                total: 2
+            }]
+        );
+
+        // `status`, which is also what the `SessionStart` hook injects.
+        let active = crate::summary::build(&p).unwrap().active.unwrap();
+        assert_eq!((active.live, active.total), (1, 2));
+
+        // `review`, the dossier a human closes from. It reports per criterion
+        // rather than as a count, so it is checked per criterion.
+        let d = crate::review::build(&p, &spec).unwrap();
+        let state = |name: &str| {
+            d.criteria
+                .iter()
+                .find(|c| c.label.contains(name))
+                .map(|c| format!("{:?}", c.evidence))
+                .unwrap_or_default()
+        };
+        assert!(
+            state("does_the_thing").starts_with("Live"),
+            "{}",
+            state("does_the_thing")
+        );
+        assert!(
+            state("also_does_the_other_thing").starts_with("Pending"),
+            "{}",
+            state("also_does_the_other_thing")
+        );
+
+        // `board`, which renders every spec at once.
+        let html = crate::board::render(&crate::board::build(&p).unwrap()).render();
+        assert!(html.contains("1/2 criteria live"), "board disagrees");
     }
 }

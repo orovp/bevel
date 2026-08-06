@@ -123,8 +123,6 @@ pub struct Dossier {
     pub open_questions: Option<String>,
     pub notes: Option<String>,
     pub mockup: Option<Mockup>,
-    /// Repo-wide count, the same number `status` reports.
-    pub pending_markers: usize,
 }
 
 pub fn build(project: &Project, spec: &Spec) -> Result<Dossier> {
@@ -132,6 +130,10 @@ pub fn build(project: &Project, spec: &Spec) -> Result<Dossier> {
     let mockup = read_mockup(project, spec);
     let lock = gate::GatesLock::load(&project.gates_lock())?;
 
+    // Computed once for the whole dossier, not once per criterion: each call
+    // walks the repository, and a spec with six tier A criteria was walking it
+    // six times to answer one question about each.
+    let states = validate::criteria_state(project, spec);
     let criteria = spec
         .front
         .acceptance
@@ -143,7 +145,7 @@ pub fn build(project: &Project, spec: &Spec) -> Result<Dossier> {
                 Criterion::B { cmd } => cmd.clone(),
                 Criterion::C { text } => text.clone(),
             },
-            evidence: evidence(project, spec, c, kind, mockup.as_ref()),
+            evidence: evidence(project, spec, c, kind, mockup.as_ref(), &states),
         })
         .collect();
 
@@ -165,7 +167,6 @@ pub fn build(project: &Project, spec: &Spec) -> Result<Dossier> {
         open_questions: read(&spec.dir.join("open-questions.md")),
         notes: read(&spec.dir.join("notes.md")),
         mockup,
-        pending_markers: validate::pending_markers(&project.root, &spec.front.id),
     })
 }
 
@@ -175,6 +176,7 @@ fn evidence(
     criterion: &Criterion,
     kind: Kind,
     mockup: Option<&Mockup>,
+    states: &[(String, validate::State)],
 ) -> Evidence {
     match criterion {
         Criterion::B { .. } => Evidence::Command,
@@ -194,16 +196,26 @@ fn evidence(
                     false => Evidence::Missing,
                 };
             }
-            match validate::locate(project, test) {
-                None => Evidence::Missing,
-                Some((path, line)) => {
+            // The state comes from the one implementation in `validate`; this
+            // only asks where to point the reader. Deciding it here as well is
+            // how `bevel review` and `bevel close` came to disagree about the
+            // same criterion.
+            let state = states.iter().find(|(n, _)| n == test).map(|(_, s)| *s);
+            match state {
+                None | Some(validate::State::Missing) => Evidence::Missing,
+                Some(s) => {
                     // Forward slashes even on Windows: this is a label a person
                     // reads, and it is the same label on both machines.
-                    let at = format!("{}:{line}", project.display_path(&path).replace('\\', "/"));
-                    if marker_near(&path, test, &spec.front.id) {
-                        Evidence::Pending(at)
-                    } else {
-                        Evidence::Live(at)
+                    let at = match validate::locate(project, test) {
+                        Some((path, line)) => {
+                            format!("{}:{line}", project.display_path(&path).replace('\\', "/"))
+                        }
+                        // Found in the spec folder, which `locate` cannot see.
+                        None => format!("{}/acceptance.*", spec.slug()),
+                    };
+                    match s {
+                        validate::State::Inert => Evidence::Pending(at),
+                        _ => Evidence::Live(at),
                     }
                 }
             }
@@ -217,30 +229,6 @@ fn in_spec_folder(spec: &Spec, test: &str) -> bool {
         .iter()
         .filter_map(|f| std::fs::read_to_string(f).ok())
         .any(|text| text.contains(test))
-}
-
-/// Is this particular test still pending?
-///
-/// The marker sits on the attribute line directly above the test in Rust and on
-/// the test's own line in the TypeScript forms, so a small window above and
-/// including the name covers every pack template. The repo-wide count from
-/// `pending_markers` remains the authority for *how many*; this only decides
-/// which row to colour, and the report says so when the two disagree.
-fn marker_near(path: &Path, test: &str, id: &str) -> bool {
-    const WINDOW: usize = 3;
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    let needle = format!("acceptance: {id} pending");
-    let lines: Vec<&str> = text.lines().collect();
-    lines
-        .iter()
-        .position(|l| l.contains(test))
-        .is_some_and(|at| {
-            lines[at.saturating_sub(WINDOW)..=at]
-                .iter()
-                .any(|l| l.contains(&needle))
-        })
 }
 
 /// The `§N` a tier C criterion points at, if it points at the mockup at all.
@@ -512,12 +500,25 @@ fn next_step(d: &Dossier) -> (String, String, &'static str) {
 
 fn close_step(d: &Dossier) -> (String, String, &'static str) {
     let judged = d.criteria.iter().filter(|c| c.tier == 'C').count();
+    let count = |f: fn(&Evidence) -> bool| d.criteria.iter().filter(|c| f(&c.evidence)).count();
+    let pending = count(|e| matches!(e, Evidence::Pending(_)));
+    // Counted from the criteria rather than from a repo-wide total, so this
+    // panel and the table above it can no longer contradict each other.
+    let missing = count(|e| matches!(e, Evidence::Missing));
+
     let mut parts = Vec::new();
-    if d.pending_markers > 0 {
+    if pending > 0 {
         parts.push(format!(
-            "{} pending marker{} still to clear",
-            d.pending_markers,
-            if d.pending_markers == 1 { "" } else { "s" }
+            "{pending} pending marker{} still to clear",
+            if pending == 1 { "" } else { "s" }
+        ));
+    }
+    // Named here too: it blocks the close, and a reader who only saw "pending"
+    // would go looking for a marker that was never written.
+    if missing > 0 {
+        parts.push(format!(
+            "{missing} criteri{} with no test at all",
+            if missing == 1 { "on" } else { "a" }
         ));
     }
     if judged > 0 {
@@ -573,20 +574,10 @@ fn criteria_card(d: &Dossier) -> String {
         })
         .collect();
 
-    let mut note = String::new();
-    let attached = d
-        .criteria
-        .iter()
-        .filter(|c| matches!(c.evidence, Evidence::Pending(_)))
-        .count();
-    if d.kind == Kind::Close && attached != d.pending_markers {
-        note = format!(
-            "<p class=note>{} pending marker{} found in the repo, {attached} of them sitting on \
-             a named criterion. The rest are on helpers, or on another spec's work.</p>",
-            d.pending_markers,
-            if d.pending_markers == 1 { "" } else { "s" }
-        );
-    }
+    // No reconciliation note here any more. It read "{n} pending markers found
+    // in the repo, {attached} of them sitting on a named criterion" — this bug,
+    // admitted in the UI and explained away. The two counts are one now.
+    let note = "";
 
     card(
         "Acceptance criteria",

@@ -5,4 +5,5 @@ Read this before opening any spec: the summaries are here so you can open only t
 
 | id | status | title | summary | criteria | packages |
 |---|---|---|---|---|---|
-| [0001](0001-i-want-to-make-bevel-compatible/spec.md) | implementing | Render the method for opencode, not only for Claude Code | `bevel sync` installs the method for one agent. A user running opencode gets the CLI and the artifacts on dis… | 8A 2B 2C | bevel |
+| [0001](0001-i-want-to-make-bevel-compatible/spec.md) | done | Render the method for opencode, not only for Claude Code | `bevel sync` installs the method for one agent. A user running opencode gets the CLI and the artifacts on dis… | 8A 2B 2C | bevel |
+| [0002](0002-bevel-close-counts-phantom-pending-markers/spec.md) | done | bevel close counts phantom pending markers: validate::pending_markers | `bevel close` refuses to close spec 0001 in this repository, reporting four pending acceptance criteria. Ther… | 6A 2B 1C | bevel |

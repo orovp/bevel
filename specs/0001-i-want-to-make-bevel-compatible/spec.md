@@ -1,7 +1,7 @@
 ---
 id: '0001'
 title: Render the method for opencode, not only for Claude Code
-status: implementing
+status: done
 schema_version: 1
 created: 2026-08-05
 packages:

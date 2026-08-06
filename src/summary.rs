@@ -53,13 +53,12 @@ pub fn build(project: &Project) -> Result<Summary> {
             Status::Review => review.push(s.front.id.clone()),
             Status::Approved => approved.push(s.front.id.clone()),
             Status::Implementing => {
-                let total = s.tier_a_tests().len();
-                let pending = validate::pending_markers(&project.root, &s.front.id);
+                let p = validate::progress(project, s);
                 active = Some(Active {
                     id: s.front.id.clone(),
                     slug: s.slug(),
-                    live: total.saturating_sub(pending),
-                    total,
+                    live: p.live,
+                    total: p.total,
                 });
             }
             _ => {}
@@ -216,13 +215,20 @@ mod tests {
         std::fs::write(
             dir.join("spec.md"),
             "---\nid: '0001'\ntitle: Active\nstatus: implementing\nschema_version: 1\n\
-             created: '2026-08-02'\nacceptance:\n- tier: A\n  test: one\n- tier: A\n  test: two\n\
-             - tier: A\n  test: three\n---\n# P\n\nx\n",
+             created: '2026-08-02'\nacceptance:\n- tier: A\n  test: sync_keeps_the_local_edit\n\
+             - tier: A\n  test: sync_reports_a_conflict\n\
+             - tier: A\n  test: sync_retries_once_on_timeout\n---\n# P\n\nx\n",
         )
         .unwrap();
+        // Names long enough to mean something: a criterion called `one` is
+        // found in INBOX.md's own "one per line", which is a substring match
+        // working as documented and a fixture that was never realistic.
         std::fs::write(
             dir.join("acceptance.rs"),
-            "#[ignore = \"acceptance: 0001 pending\"]\nfn three() {}\n",
+            "fn sync_keeps_the_local_edit() {}\n\
+             fn sync_reports_a_conflict() {}\n\
+             #[ignore = \"acceptance: 0001 pending\"]\n\
+             fn sync_retries_once_on_timeout() {}\n",
         )
         .unwrap();
 
