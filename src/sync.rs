@@ -821,8 +821,19 @@ cannot drift apart.
 /// What a project needs said about itself. The pipeline is here rather than in
 /// the skills because it is the part a reader needs before invoking one.
 ///
+/// **The two skills are the entry points, and the commands are shown nested
+/// under the one that runs them.** A flat list of commands reads as a sequence
+/// to type, which is wrong twice over: `/shape` already runs `bevel shape`,
+/// `validate` and `review` itself, `/implement` already runs `start`, `verify`
+/// and `close`, and an agent working the list by hand skips every instruction
+/// in between — the interview, the blind spot pass, the adversarial review.
+/// The nesting is what makes the skill, not the command, the thing you invoke.
+///
 /// Loaded every turn, so it is kept under 50 lines and `bevel doctor` says so
-/// when it is not.
+/// when it is not. That budget is why the list stops where it does: `fmt`,
+/// `index`, `board`, `list` and `migrate` are discoverable from `bevel --help`
+/// and cost nothing to omit, while a command an agent needs mid-loop and cannot
+/// guess earns its line.
 ///
 /// Printed by `bevel notes`, never written. Editing it therefore changes what
 /// the next reader is *offered*, and nothing already on anyone's disk — which
@@ -837,30 +848,31 @@ here, and nothing here is repeated in another file.
 ## The loop
 
 Ideas live in `INBOX.md`. Shaping turns one into a spec under `specs/`; a human
-approves it; implementation builds it against that spec.
+approves it; implementation builds it against that spec. Two skills drive it,
+and each runs the commands indented under it — invoke the skill, not the list:
 
 ```
-bevel status                   where things stand
-bevel shape <n>                reserve an id, scaffold specs/NNNN-slug/
-bevel validate <id>            deterministic rules; draft -> review
-bevel start <id>               claim an approved spec (checks the gate)
-bevel close <id>               finish it; enforces markers and verification
-bevel verify --affected        only what changed, plus its dependents
-bevel docs <lib> --spec <id>   version-pinned docs from the lockfile
+bevel status                    where things stand — start here
+bevel inbox add "<idea>"        capture it; precision comes later
+
+/shape <n>                      inbox item -> a spec a human can approve
+  bevel shape <n>               reserve an id, scaffold specs/NNNN-slug/
+  bevel validate <id>           deterministic rules; draft -> review
+  bevel review <id>             the dossier the human approves from
+
+/implement <id>                 an approved spec -> code
+  bevel start <id>              claim it; checks the gate first
+  bevel docs <lib> --spec <id>  version-pinned docs from the lockfile
+  bevel verify --affected       only what changed, plus its dependents
+  bevel close <id>              markers, verification, then done
 ```
 
-`bevel approve` is missing from that list on purpose. It requires a terminal,
-so an agent cannot run it. Ask the human, and say what changed.
+`bevel approve <id>` belongs between the two and is absent on purpose: it
+requires a terminal, so an agent cannot run it. Ask the human, and say what
+changed. `bevel pause <id>` hands the slot back without losing the approval.
 
-## Full instructions
-
-```
-bevel method show shape
-bevel method show implement
-```
-
-Those print the same text a `/shape` or `/implement` command would load, so the
-pipeline works in any agent whether or not it has slash commands.
+Without slash commands, `bevel method show shape` and `bevel method show
+implement` print the same text the skills load.
 
 ## Gotchas
 
@@ -1077,13 +1089,41 @@ mod tests {
     #[test]
     fn the_project_notes_are_printed_for_a_human_to_apply() {
         let text = notes(Notes::Agents);
-        assert!(text.contains("bevel start <id>"));
+
+        // Both skills, because they are the entry points: an agent that reads a
+        // bare command list works it by hand and skips everything the skill
+        // does between the commands — the interview, the blind spot pass, the
+        // adversarial review. Naming `/shape` and `/implement` is what makes
+        // the commands beneath them a description rather than a recipe.
+        assert!(text.contains("/shape"));
+        assert!(text.contains("/implement"));
+
+        // Every command a skill runs, so the loop reads end to end and an agent
+        // that has to drive it by hand still can.
+        for cmd in [
+            "bevel status",
+            "bevel inbox add",
+            "bevel shape <n>",
+            "bevel validate <id>",
+            "bevel review <id>",
+            "bevel start <id>",
+            "bevel docs <lib> --spec <id>",
+            "bevel verify --affected",
+            "bevel close <id>",
+            "bevel pause <id>",
+        ] {
+            assert!(text.contains(cmd), "the loop lost `{cmd}`");
+        }
+
         // The exact invocation, not an approximation of it: `bevel method
         // shape` is an unrecognised subcommand and exits 2, so a seed that
         // says it sends every agent down a failing path on its first read.
         assert!(text.contains("bevel method show shape"));
         // The reason approve is absent has to be stated, or an agent will try.
         assert!(text.contains("requires a terminal"));
+
+        // The budget is the ceiling this list grows against, and the user still
+        // has to fit their own gotchas underneath it (DESIGN.md §13).
         assert!(text.lines().count() <= 50, "{} lines", text.lines().count());
 
         // No marker. This text becomes the user's the moment they apply it, and

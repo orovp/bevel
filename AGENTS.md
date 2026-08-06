@@ -6,30 +6,31 @@ here, and nothing here is repeated in another file.
 ## The loop
 
 Ideas live in `INBOX.md`. Shaping turns one into a spec under `specs/`; a human
-approves it; implementation builds it against that spec.
+approves it; implementation builds it against that spec. Two skills drive it,
+and each runs the commands indented under it — invoke the skill, not the list:
 
 ```
-bevel status                   where things stand
-bevel shape <n>                reserve an id, scaffold specs/NNNN-slug/
-bevel validate <id>            deterministic rules; draft -> review
-bevel start <id>                 claim an approved spec (checks the gate)
-bevel close <id>                 finish it; enforces markers and verification
-bevel verify --affected        only what changed, plus its dependents
-bevel docs <lib> --spec <id>   version-pinned docs from the lockfile
+bevel status                    where things stand — start here
+bevel inbox add "<idea>"        capture it; precision comes later
+
+/shape <n>                      inbox item -> a spec a human can approve
+  bevel shape <n>               reserve an id, scaffold specs/NNNN-slug/
+  bevel validate <id>           deterministic rules; draft -> review
+  bevel review <id>             the dossier the human approves from
+
+/implement <id>                 an approved spec -> code
+  bevel start <id>              claim it; checks the gate first
+  bevel docs <lib> --spec <id>  version-pinned docs from the lockfile
+  bevel verify --affected       only what changed, plus its dependents
+  bevel close <id>              markers, verification, then done
 ```
 
-`bevel approve` is missing from that list on purpose. It requires a terminal,
-so an agent cannot run it. Ask the human, and say what changed.
+`bevel approve <id>` belongs between the two and is absent on purpose: it
+requires a terminal, so an agent cannot run it. Ask the human, and say what
+changed. `bevel pause <id>` hands the slot back without losing the approval.
 
-## Full instructions
-
-```
-bevel method show shape
-bevel method show implement
-```
-
-Those print the same text a `/shape` or `/implement` command would load, so the
-pipeline works in any agent whether or not it has slash commands.
+Without slash commands, `bevel method show shape` and `bevel method show
+implement` print the same text the skills load.
 
 ## Gotchas
 
