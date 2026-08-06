@@ -501,7 +501,10 @@ strictly better:
 
 Enforcement is one check: `bevel gate <id>` fails if a *different* spec is already
 `implementing`, and names it. That is the same exit code the pipeline already depends on, so it
-costs nothing new.
+costs nothing new. What shipped folds the two moves together: `bevel start <id>` runs that check
+*and* writes the status, so there is no window in which a spec has passed the gate but not yet
+claimed the slot, and no way to claim one without passing. `gate` remains on its own for anything
+that wants to ask without claiming.
 
 **Pausing.** `bevel pause <id>` returns the spec to `approved`. The hash is untouched, so
 resuming needs no re-approval. Nothing is lost by pausing because **progress was never stored in
@@ -602,7 +605,8 @@ straight past it. **An instruction is not a guardrail** (R4).
 
 3. **A deny rule in the Claude Code adapter** on `Bash(bevel approve*)`. Second layer.
 
-4. **`bevel gate <id>` is the first line of `/implement`** and it is an exit code.
+4. **The gate is the first thing `/implement` runs**, and it is an exit code — in the shipped
+   pipeline via `bevel start <id>`, which checks it and claims the slot in one step.
 
 Because `gates.lock` is in git, an approval made at home is present at work after a pull. That
 is the multi-machine payoff of having versioned it.
@@ -847,7 +851,9 @@ inferred.
 
 Goal: execute an approved spec without reopening design decisions.
 
-**Phase 0 — Gate.** `bevel gate 0007`. Exit code. If it fails, stop.
+**Phase 0 — Claim.** `bevel start 0007`. Exit code. If it fails, stop. Gate and slot are taken
+together (§5), so the three failure modes it reports — not approved, hash mismatch, another spec
+active — are the same three the gate has always had, plus the one the slot adds.
 
 **Phase 1 — Context pack (isolated subagent).** Detects which frameworks the spec touches,
 reads **the lockfiles** for exact versions, queries Context7 for *those* versions, writes
@@ -894,6 +900,12 @@ Closing requires **zero remaining `acceptance: 0007` pending markers** (§7). An
 declare done while a named criterion is still ignored, and because the markers are countable,
 `bevel status` can show partial progress as `5/7 criteria live` instead of a self-reported
 percentage. Then `status: done` and the commit SHA lands in `gates.lock`.
+
+That last step is `bevel close <id>`, and it is a command rather than an edit for the same reason
+approval is: **the status is the enforcement point, so nothing that the status gates may be free
+to write it.** `close` re-runs verification, refuses while any pending marker remains, refuses if
+the spec was amended after approval, and refuses on Tier C until a human has confirmed the
+checklist in a terminal. An agent editing `status: done` by hand would bypass all four at once.
 
 ### Depth, and why there is no `--quick` flag
 
@@ -972,7 +984,7 @@ field guide's pattern: *compile artifacts and hand them to a fresh session*.
 | Missing capability | Degradation |
 |---|---|
 | Subagents | Sequential phases; open a new session between heavy phases |
-| Hooks | The gate stops auto-blocking; still `bevel gate` at step 0 |
+| Hooks | The gate stops auto-blocking; still `bevel start` at step 0 |
 | MCP (Context7) | `bevel docs` over HTTP from the CLI (§10) |
 | Worktrees | Everything in the main tree |
 
@@ -1095,25 +1107,45 @@ quietly; only the last one leaves a trace.
 ## 11. The CLI
 
 ```
-bevel init                     # install/update user layer, detect available agents
 bevel project init --monorepo  # scaffold .bevel/, INBOX.md, specs/, AGENTS.md
-bevel sync                     # render adapters from the method layers (idempotent)
+bevel sync                     # install the method into ~/.claude, and the project's notes
 bevel doctor                   # versions, workspace map, packs, Context7, broken gates
 bevel doctor --context         # ← the harness token budget (§13)
 bevel status                   # fixed-size summary — never a list (see below)
 bevel list [--status …]        # the list, when you actually want one
+bevel inbox add "…"            # capture cheaply; precision comes later
 bevel shape <n|"text">         # reserve an ID and create specs/NNNN-slug/
 bevel validate <id>            # schema + rubrics + Tier A/B presence + name↔test match
 bevel approve <id>             # TTY-only. Freezes the hash in gates.lock
 bevel gate <id>                # exit 0/1; fails if another spec is implementing
+bevel start <id>               # the gate, plus the active slot, in one step (§5)
 bevel pause <id>               # implementing → approved, hash untouched
+bevel close <id>               # markers + verification + Tier C; writes done and the commit SHA
+bevel pending                  # advisory: unfinished work on the active spec. Always exits 0
 bevel verify [--affected]      # active-pack commands + Tier B criteria
 bevel verify --spec <id>       # that spec's acceptance tests, ignored ones included
 bevel docs <lib> [--topic]     # Context7 pinned to the lockfile version, cached
+bevel method show <name>       # print one body, for an agent without slash commands
+bevel fmt --file <path>        # format using the pack that owns the file
+bevel index [--html]           # regenerate specs/README.md
+bevel review <id>              # the dossier a human approves or closes from
+bevel board                    # the whole pipeline on one page, for a human
 bevel migrate                  # migrate projects across method versions
 ```
 
-All support `--json` so the agent parses structured output instead of guessing at prose.
+**The commands an agent branches on carry `--json`** — `status`, `list`, `validate`, `approve`,
+`gate`, `start`, `pause`, `close` and `doctor` — so a decision is a parse rather than a guess at
+prose. That set is exactly the state machine of §5, which is the point: every transition is
+machine-readable, and everything else is output a human or a tool owns. `shape`, `verify`, `docs`
+and `migrate` have no `--json` because none of them is a branch — `verify` passes a toolchain's
+own diagnostics through, and reformatting those would discard the part that makes a failure
+actionable.
+
+**The four HTML reports are the sharper exception.** `review`, `board`, `index --html` and
+`doctor --context --html` take `--open`, never `--json`, because they are the half of the
+pipeline pointed at a human. A machine format would invite an agent to read back a page costing
+several times the tokens of the markdown it was rendered from, to learn facts already available
+to it from the source file. The absent flag is the affordance.
 
 ### `status` at a hundred specs
 

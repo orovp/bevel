@@ -24,8 +24,8 @@ so an agent cannot run it. Ask the human, and say what changed.
 ## Full instructions
 
 ```
-bevel method shape
-bevel method implement
+bevel method show shape
+bevel method show implement
 ```
 
 Those print the same text a `/shape` or `/implement` command would load, so the
