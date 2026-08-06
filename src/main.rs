@@ -56,8 +56,10 @@ enum Command {
     Status(StatusArgs),
     /// Enumerate specs
     List(ListArgs),
-    /// Install the method into ~/.claude, and this project's notes if there is one
+    /// Install the method into ~/.claude and this project's .claude/settings.json
     Sync(SyncArgs),
+    /// Print the agent notes for this project, to apply yourself if you want them
+    Notes(NotesArgs),
     /// Inspect, print or download the method tree
     #[command(subcommand)]
     Method(MethodCmd),
@@ -150,6 +152,26 @@ struct StatusArgs {
     /// A few lines only, for injection at session start
     #[arg(long)]
     brief: bool,
+}
+
+/// `bevel notes [FILE]`, printing markdown and nothing else.
+///
+/// Stdout stays pure so `bevel notes > AGENTS.md` is the whole workflow. A
+/// "wrote it for you" line here would be the same overreach the command exists
+/// to undo, one stream over.
+#[derive(Args)]
+struct NotesArgs {
+    /// Which file the markdown is for
+    #[arg(value_enum, default_value_t = NotesFile::Agents)]
+    file: NotesFile,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy)]
+enum NotesFile {
+    /// The body a project says about itself
+    Agents,
+    /// The two-line pointer at AGENTS.md
+    Claude,
 }
 
 #[derive(Subcommand)]
@@ -346,6 +368,7 @@ fn run() -> Result<ExitCode> {
         Command::Verify(args) => cmd_verify(args),
         Command::Doctor(args) => cmd_doctor(args),
         Command::Sync(args) => cmd_sync(args),
+        Command::Notes(args) => cmd_notes(args),
         Command::Docs(args) => cmd_docs(args),
         Command::Method(cmd) => cmd_method(cmd),
         Command::Fmt(args) => cmd_fmt(args),
@@ -530,13 +553,36 @@ fn cmd_sync(args: SyncArgs) -> Result<ExitCode> {
         println!("{action}");
     }
     // Say which half ran. Silence here reads as "everything is installed", and
-    // the project files really are missing.
+    // the settings file really is missing.
     if p.is_none() {
         println!(
             "\nno project here, so only the machine-wide method was installed.\n  \
-             run `bevel project init` inside a repository for its AGENTS.md"
+             run `bevel sync` inside a repository for its .claude/settings.json"
         );
     }
+    // Sync used to write AGENTS.md and CLAUDE.md, so this is where someone
+    // finds out that it does not any more — and what to run instead. Named on
+    // every run rather than only when the file is missing: bevel deliberately
+    // does not look, and guessing from an absence it never checks would be a
+    // worse habit than one extra line.
+    println!("\nproject notes are yours to write. `bevel notes` prints a starting point:\n  bevel notes > AGENTS.md");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Print the markdown, and nothing else at all.
+///
+/// No project lookup, no method tree, no layers: the text is a constant in the
+/// binary, so this works in an empty directory and on a machine where nothing
+/// has been installed yet. That is deliberate — it is the command someone runs
+/// *before* the repository looks like anything.
+fn cmd_notes(args: NotesArgs) -> Result<ExitCode> {
+    print!(
+        "{}",
+        sync::notes(match args.file {
+            NotesFile::Agents => sync::Notes::Agents,
+            NotesFile::Claude => sync::Notes::Claude,
+        })
+    );
     Ok(ExitCode::SUCCESS)
 }
 

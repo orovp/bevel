@@ -14,9 +14,9 @@ acceptance:
 - tier: A
   test: the_claude_only_model_shorthand_is_dropped_rather_than_translated
 - tier: A
-  test: the_project_body_lives_in_agents_md_with_claude_md_pointing_at_it
+  test: the_project_notes_are_printed_for_a_human_to_apply
 - tier: A
-  test: a_hand_edited_claude_md_is_moved_whole_and_never_silently_discarded
+  test: sync_never_writes_or_moves_the_projects_instruction_files
 - tier: A
   test: the_always_loaded_context_budget_follows_the_body_to_agents_md
 - tier: A
@@ -175,29 +175,42 @@ exists to correct. `README.md:24`'s example changes accordingly.
 **Scope stays per machine.** The method is the same text in every project
 (`src/sync.rs:112-116`); a second agent does not change that reasoning.
 
-### The instructions migration
+### The instructions are printed, not installed
 
-`CLAUDE.md` has no generated marker — it is written by `write_if_absent`
-(`src/sync.rs:151`) and the `CLAUDE_MD` constant carries none — so the marker
-convention cannot classify it. The rule instead:
+*Amended after approval — see "Amendment" below.*
 
-- **Byte-identical to `CLAUDE_MD`** → generated. Replaced by the pointer, body
-  written to `AGENTS.md`.
-- **Anything else** → the user's. The file is **moved whole** to `AGENTS.md`
-  and a pointer left behind, so one instruction still lives in one place.
+`sync` writes neither `AGENTS.md` nor `CLAUDE.md`. `bevel notes` prints the
+markdown to stdout and the user redirects it if they want it:
 
-Moving a user's file is the only place in this design where bevel does that, and
-it is fenced: **an existing `AGENTS.md` is never overwritten** — if one is
-present, the instructions resource is reported and skipped entirely — and the
-move is reported as a move, not as a write.
+```
+bevel notes > AGENTS.md
+bevel notes claude > CLAUDE.md
+```
+
+This is not a smaller version of the migration it replaces; it is the reason the
+migration is unnecessary. `CLAUDE.md` had no generated marker, so classifying it
+required a byte comparison against a frozen copy of what bevel used to write —
+which had to stay frozen, which froze the seed with it. Getting the comparison
+wrong meant relocating a user's own prose. A `CLAUDE.md` symlinked at `AGENTS.md`
+had to be detected before it was followed. All three were correct answers to
+"who owns this file?", a question that only exists while bevel writes it.
+
+Stdout carries markdown and nothing else, so the redirect is the whole workflow.
+`bevel sync` names the command on every run, since that is where someone who
+expected the old behaviour finds out about the new one.
 
 ### The context budget must follow the body
 
 `src/context.rs:144-152` hardcodes `CLAUDE.md` as the only `Load::Always` item
 at a 50-line budget, and the loop beneath it walks `project.config.packages`
-only, so a root `AGENTS.md` is never audited. Moving the body without moving the
-measurement retires the check DESIGN.md §13 calls "the piece most likely to save
-this project long-term" — silently, and while every test still passes.
+only, so a root `AGENTS.md` is never audited. Putting the body there without
+moving the measurement retires the check DESIGN.md §13 calls "the piece most
+likely to save this project long-term" — silently, and while every test still
+passes. Both files are audited instead.
+
+The amendment makes this *more* load-bearing, not less: bevel no longer authors
+either file, so nothing upstream constrains its length and this audit is the
+only thing that ever counts the lines.
 
 ### The replacement for DESIGN.md §9
 
@@ -266,3 +279,44 @@ for nobody. After this spec:
   (`claude_md_carries_the_runnable_pipeline_and_stays_in_budget`) and the help
   string at `src/main.rs:514` all encode `CLAUDE.md` as the body. They are
   corrected, not loosened.
+
+## Amendment — 2026-08-06, after approval
+
+**`bevel sync` no longer writes `AGENTS.md` or `CLAUDE.md`. `bevel notes` prints
+them and the user applies what they want.** Requested directly, with the break to
+existing projects accepted explicitly.
+
+Two tier A criteria named tests that this removes, so they are replaced rather
+than dropped — an acceptance list naming a deleted test never passes `validate`
+again, and silently shrinking the list would lower the bar the spec was approved
+against:
+
+| Was | Is now |
+|---|---|
+| `the_project_body_lives_in_agents_md_with_claude_md_pointing_at_it` | `the_project_notes_are_printed_for_a_human_to_apply` |
+| `a_hand_edited_claude_md_is_moved_whole_and_never_silently_discarded` | `sync_never_writes_or_moves_the_projects_instruction_files` |
+
+The second replacement is stronger than what it replaces. The old test proved
+bevel relocated a user's `CLAUDE.md` *correctly*; the new one proves it does not
+touch either file at all — including one holding bytes no UTF-8 decoder accepts,
+and one holding the seed applied verbatim, which is precisely the case the
+deleted byte comparison existed to classify.
+
+`the_always_loaded_context_budget_follows_the_body_to_agents_md` is unaffected
+and unchanged: both files are still audited, and now nothing else constrains
+their length.
+
+**This invalidates the approval hash.** Re-run `bevel approve 0001` before
+`bevel close`.
+
+### What this removes
+
+`ensure_agents_md`, the `Instructions` struct, the `InstructionTarget` trait and
+both its impls, `GENERATED_CLAUDE_MD`, `replace`, `exists`, `is_symlink`,
+`generated`, and `Action::Moved`. That last one is now an invariant rather than
+an omission: sync only touches files it generates, so it never holds a user's
+content to relocate.
+
+The Rabbit holes entry "The rename precedent" is settled by this and not by a
+finished migration — there is no second generation of the file to leave behind,
+because bevel writes no generation of it.

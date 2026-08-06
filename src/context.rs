@@ -140,9 +140,16 @@ pub fn audit(project: &Project, layers: &Layers, source: &method::Source) -> Res
     let mut items = Vec::new();
 
     // Both are loaded every turn — AGENTS.md carries the pipeline notes and
-    // CLAUDE.md points at it — so both are measured. Measuring only the pointer
-    // would retire this check silently the moment the body moved, which is the
-    // failure this pair of entries exists to prevent (DESIGN.md §13).
+    // CLAUDE.md points at it — so both are measured. Measuring only one would
+    // retire this check silently the moment the body sat in the other, which is
+    // the failure this pair of entries exists to prevent (DESIGN.md §13).
+    //
+    // Neither is written by bevel; `bevel notes` prints them and the user
+    // applies what they want. That makes the budget more load-bearing here, not
+    // less: nothing upstream constrains a file bevel does not author, so this
+    // audit is the only thing that ever counts its lines. Both are absent until
+    // someone applies them, and `measure_tracked` returns `None` for a file
+    // that is not there rather than reporting an empty one.
     for name in ["AGENTS.md", "CLAUDE.md"] {
         if let Some(i) = measure_tracked(
             name,

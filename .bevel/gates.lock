@@ -3,7 +3,7 @@
 # a diff. Written by `bevel approve`.
 
 [spec.0001]
-hash = "sha256:3bb2da9bc49ba525b9ad109110313bb56418a7a788010b5426416ee39b856916"
-approved_at = "2026-08-05T21:45:16.934282256+00:00"
+hash = "sha256:61d456fcc7d3f83da31eb0b512a8cb58e9d7cd0459192a8e2b28c50e5ef2df31"
+approved_at = "2026-08-06T15:28:07.772541489+00:00"
 approved_by = "orovp"
 bevel_version = "0.1.0"

@@ -4,16 +4,27 @@
 //! was the condition set when five speculative renderers were deleted from this
 //! file. What arrived with the second agent was not a fifth of a pattern but
 //! the observation that agents differ *per resource kind*, not wholesale:
-//! opencode scans `~/.claude/skills` and needs no skill rendering at all, has
-//! no `.claude/agents` fallback and needs every subagent translated, and reads
-//! `AGENTS.md` where Claude Code reads `CLAUDE.md`. Hence one trait per kind
-//! rather than one renderer per agent.
+//! opencode scans `~/.claude/skills` and needs no skill rendering at all, and
+//! has no `.claude/agents` fallback so needs every subagent translated. Hence
+//! one trait per kind rather than one renderer per agent.
 //!
 //! A third agent will not fit these traits exactly, and that is expected: they
 //! are internal, promise nothing, and the third is free to reshape them.
 //!
+//! **`AGENTS.md` and `CLAUDE.md` are not among the kinds.** They were, and the
+//! removal is the load-bearing decision in this file: sync writes into `~` and
+//! into `.claude/settings.json`, which are configuration, and it stopped
+//! writing the two files that are *prose a project owns about itself*. Every
+//! sharp edge that file ever had came from that confusion — a byte comparison
+//! standing in for a missing marker, a migration that relocated a user's own
+//! writing, a symlink that had to be detected before it was followed, and a
+//! seed frozen against improvement because it doubled as the fingerprint of
+//! what shipped years earlier. `bevel notes` prints the markdown to stdout and
+//! the user applies it or does not. Nothing to classify, nothing to migrate,
+//! nothing to clobber.
+//!
 //! What was never agent-specific survives untouched: the method has one source
-//! on disk, and `bevel method shape` prints it. Only the *frontmatter* of a
+//! on disk, and `bevel method show shape` prints it. Only the *frontmatter* of a
 //! subagent is transliterated; no instruction text is ever copied into anyone's
 //! prompt format, so there is still nothing to drift.
 
@@ -77,25 +88,16 @@ const COMMAND_PREFIXES: [&str; 2] = ["bevel ", "harness "];
 
 // ------------------------------------------------------------------ actions
 
+/// What a sync did to one file.
+///
+/// There is no `Moved` variant, and its absence is the invariant: sync only
+/// ever touches files it generates, so it never has a user's own content in
+/// its hands to relocate.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
     Wrote(String),
     Removed(String),
-    /// Content relocated rather than generated. Distinct from `Wrote` because
-    /// the only file this happens to is one the user wrote themselves, and
-    /// "wrote CLAUDE.md" would describe that as though bevel had authored it.
-    Moved(String, String),
     Skipped(String, &'static str),
-}
-
-impl Action {
-    /// The file this action is about — its destination, for a move.
-    fn path(&self) -> &str {
-        match self {
-            Action::Wrote(p) | Action::Removed(p) | Action::Skipped(p, _) => p,
-            Action::Moved(_, to) => to,
-        }
-    }
 }
 
 impl std::fmt::Display for Action {
@@ -103,7 +105,6 @@ impl std::fmt::Display for Action {
         match self {
             Action::Wrote(p) => write!(f, "  wrote   {p}"),
             Action::Removed(p) => write!(f, "  removed {p}"),
-            Action::Moved(from, to) => write!(f, "  moved   {from} -> {to}"),
             Action::Skipped(p, why) => write!(f, "  skipped {p} ({why})"),
         }
     }
@@ -174,13 +175,6 @@ impl Agent {
             Agent::Opencode => &OpenCode,
         }
     }
-
-    fn instructions(self) -> &'static dyn InstructionTarget {
-        match self {
-            Agent::Claude => &ClaudeCode,
-            Agent::Opencode => &OpenCode,
-        }
-    }
 }
 
 /// Which agents to render for, when the user did not say.
@@ -227,10 +221,6 @@ trait SubagentTarget {
     fn subagents(&self, cx: &Cx) -> Result<Vec<Action>>;
 }
 
-trait InstructionTarget {
-    fn instructions(&self, cx: &Cx) -> Result<Vec<Action>>;
-}
-
 struct ClaudeCode;
 struct OpenCode;
 
@@ -274,9 +264,6 @@ pub fn sync(
 
     for agent in agents {
         actions.extend(agent.subagents().subagents(&cx)?);
-    }
-    for agent in agents {
-        actions.extend(agent.instructions().instructions(&cx)?);
     }
 
     // Project-scoped on purpose, unlike everything above: these hooks shell out
@@ -357,53 +344,6 @@ impl SubagentTarget for OpenCode {
             actions.push(write_generated(&dest, &rendered, cx.project, cx.layers)?);
         }
         Ok(actions)
-    }
-}
-
-impl InstructionTarget for ClaudeCode {
-    fn instructions(&self, cx: &Cx) -> Result<Vec<Action>> {
-        let Some(p) = cx.project else {
-            return Ok(Vec::new());
-        };
-        let Instructions {
-            mut actions,
-            managed,
-        } = ensure_agents_md(p, cx)?;
-        // When `AGENTS.md` is the user's, the whole resource steps aside: a
-        // pointer at a file bevel does not manage is an unrequested file in
-        // someone's repository, pointing somewhere we cannot vouch for.
-        if !managed {
-            return Ok(actions);
-        }
-        // The pointer, in the file Claude Code loads every turn. Two lines
-        // rather than a second copy of the body: one instruction lives in one
-        // place, and a pointer cannot disagree with what it points at.
-        //
-        // Generated rather than written-if-absent, so a later migration can
-        // still tell it from a file someone edited — the distinction this
-        // whole `AGENTS.md` move existed to restore.
-        let claude = p.root.join("CLAUDE.md");
-        let rel = display(cx.project, cx.layers, &claude);
-        if !actions.iter().any(|a| a.path() == rel) && !is_symlink(&claude) {
-            actions.push(write_generated(
-                &claude,
-                CLAUDE_MD_POINTER,
-                cx.project,
-                cx.layers,
-            )?);
-        }
-        Ok(actions)
-    }
-}
-
-/// opencode reads `AGENTS.md` first and falls back to `CLAUDE.md` only when
-/// there is none. It needs the body and nothing else.
-impl InstructionTarget for OpenCode {
-    fn instructions(&self, cx: &Cx) -> Result<Vec<Action>> {
-        let Some(p) = cx.project else {
-            return Ok(Vec::new());
-        };
-        Ok(ensure_agents_md(p, cx)?.actions)
     }
 }
 
@@ -637,127 +577,6 @@ fn write_generated(
     Ok(Action::Wrote(rel))
 }
 
-/// What `ensure_agents_md` concluded, because the caller's next move depends
-/// on it: the `CLAUDE.md` pointer is only bevel's to maintain when `AGENTS.md`
-/// is bevel's to maintain.
-struct Instructions {
-    actions: Vec<Action>,
-    /// False when `AGENTS.md` belongs to the user, in which case the whole
-    /// resource steps aside rather than adding a pointer to a file bevel does
-    /// not manage.
-    managed: bool,
-}
-
-/// Put the project's instructions in `AGENTS.md`, migrating what is there.
-///
-/// `CLAUDE.md` carries no generated marker — the code that wrote it appended
-/// none — so the marker convention cannot classify it and a byte comparison
-/// against the text we used to write does.
-///
-/// | `AGENTS.md` | `CLAUDE.md` | outcome |
-/// |---|---|---|
-/// | present | any | left exactly as it is |
-/// | absent | absent | body written |
-/// | absent | what we used to write | body written, pointer replaces it |
-/// | absent | anything else | moved whole, pointer left behind |
-///
-/// **Existence, not readability, is what the first row turns on.** A file that
-/// cannot be decoded as UTF-8 is still a file someone wrote; treating a failed
-/// read as "absent" would overwrite it, and that is a byte-for-byte data loss
-/// with no symptom. The code this replaced used `path.exists()` and was right
-/// to.
-///
-/// The last row is the only place in this design where bevel relocates content
-/// a user wrote, which is why it is reported as a move and why an existing
-/// `AGENTS.md` is never overwritten to make room for it.
-fn ensure_agents_md(p: &Project, cx: &Cx) -> Result<Instructions> {
-    let agents = p.root.join("AGENTS.md");
-    let claude = p.root.join("CLAUDE.md");
-    let rel = |path: &Path| display(cx.project, cx.layers, path);
-
-    // Seeded once and never rewritten. `AGENTS.md` is the project's own notes
-    // file — its whole purpose is the gotchas a user writes into it — so the
-    // marker identifies our seed and is never licence to replace what someone
-    // has since written over it.
-    if exists(&agents) {
-        let ours = std::fs::read_to_string(&agents).is_ok_and(|t| t == generated(AGENTS_MD));
-        return Ok(Instructions {
-            actions: vec![Action::Skipped(
-                rel(&agents),
-                if ours { "unchanged" } else { "already present" },
-            )],
-            managed: ours,
-        });
-    }
-
-    // Writing through a symlink replaces its target, and a `CLAUDE.md`
-    // symlinked to `AGENTS.md` is exactly the pointer this design describes —
-    // so following it would destroy the body on every sync.
-    if is_symlink(&claude) {
-        return Ok(Instructions {
-            actions: vec![Action::Skipped(rel(&claude), "symlink")],
-            managed: false,
-        });
-    }
-
-    let existing = match std::fs::read_to_string(&claude) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Instructions {
-                actions: vec![write_generated(&agents, AGENTS_MD, cx.project, cx.layers)?],
-                managed: true,
-            })
-        }
-        // Present, and not text we can classify. Theirs by default: the only
-        // safe assumption about bytes we cannot read is that someone wants them.
-        Err(_) => {
-            return Ok(Instructions {
-                actions: vec![Action::Skipped(rel(&claude), "unreadable")],
-                managed: false,
-            })
-        }
-    };
-
-    if existing == GENERATED_CLAUDE_MD {
-        // Ours, so there is nothing to preserve: write the body where it now
-        // belongs and let the pointer replace the copy.
-        return Ok(Instructions {
-            actions: vec![
-                write_generated(&agents, AGENTS_MD, cx.project, cx.layers)?,
-                replace(&claude, CLAUDE_MD_POINTER, cx)?,
-            ],
-            managed: true,
-        });
-    }
-
-    // Theirs. Every byte moves, and the pointer goes back in its place so the
-    // file Claude Code loads still leads somewhere.
-    std::fs::write(&agents, &existing)
-        .with_context(|| format!("cannot write {}", agents.display()))?;
-    Ok(Instructions {
-        actions: vec![
-            Action::Moved(rel(&claude), rel(&agents)),
-            replace(&claude, CLAUDE_MD_POINTER, cx)?,
-        ],
-        managed: true,
-    })
-}
-
-/// Present on disk, whatever it is and whether or not it can be read — a
-/// broken symlink included, which `Path::exists` would call absent.
-fn exists(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok()
-}
-
-fn is_symlink(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
-}
-
-/// A generated file's full contents, marker and all.
-fn generated(body: &str) -> String {
-    format!("{}\n\n{MARKER}\n", body.trim_end())
-}
-
 // --------------------------------------------------- opencode frontmatter
 
 /// What our subagent definitions declare.
@@ -870,18 +689,6 @@ fn opencode_action(tool: &str) -> Result<(&'static str, &'static str)> {
              quietly lose the capability"
         ),
     })
-}
-
-/// Overwrite unconditionally, with the marker.
-///
-/// Only reached once the caller has established that whatever was there is
-/// either ours or already preserved elsewhere. The marker is what stops this
-/// file becoming the next `CLAUDE.md`: a file bevel writes without one can
-/// never afterwards be told apart from a file the user wrote.
-fn replace(path: &Path, body: &str, cx: &Cx) -> Result<Action> {
-    std::fs::write(path, format!("{}\n\n{MARKER}\n", body.trim_end()))
-        .with_context(|| format!("cannot write {}", path.display()))?;
-    Ok(Action::Wrote(display(cx.project, cx.layers, path)))
 }
 
 /// Add the deny rule and, optionally, the hooks — without disturbing anything
@@ -998,34 +805,31 @@ fn is_ours(entry: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// The two-line stand-in left where the body used to be.
+/// The two-line `CLAUDE.md` that points at the notes.
 ///
 /// Claude Code loads `CLAUDE.md` every turn and opencode reads `AGENTS.md`
-/// first, so the body lives in the file both can reach and this one points at
+/// first, so the body belongs in the file both can reach and this one points at
 /// it. A pointer cannot drift from what it points at; a second copy can.
+///
+/// Printed by `bevel notes claude`, never written. See [`notes`].
 const CLAUDE_MD_POINTER: &str = r#"See [AGENTS.md](AGENTS.md).
 
 One instruction lives in one place; this file is a pointer so the two
 cannot drift apart.
 "#;
 
-/// The body bevel wrote into `CLAUDE.md` before `AGENTS.md` existed.
-///
-/// Kept verbatim for one purpose: recognising an untouched generated file, so
-/// the migration can tell it apart from one a user edited. `write_if_absent`
-/// appended no marker, so a byte comparison is the only discriminator there
-/// has ever been. Do not tidy this text — editing it would reclassify every
-/// `CLAUDE.md` already on disk as hand-written.
-const GENERATED_CLAUDE_MD: &str = CLAUDE_MD;
-
-/// What this project needs said about itself. The pipeline is here rather than
-/// in the skills because it is the part a reader needs before invoking one.
+/// What a project needs said about itself. The pipeline is here rather than in
+/// the skills because it is the part a reader needs before invoking one.
 ///
 /// Loaded every turn, so it is kept under 50 lines and `bevel doctor` says so
 /// when it is not.
-const AGENTS_MD: &str = CLAUDE_MD;
-
-const CLAUDE_MD: &str = r#"# Agent notes
+///
+/// Printed by `bevel notes`, never written. Editing it therefore changes what
+/// the next reader is *offered*, and nothing already on anyone's disk — which
+/// is what makes it freely editable. It carries no generated marker for the
+/// same reason: the moment a user pastes this into their repository it is
+/// theirs, and a marker claiming otherwise would be false the second it landed.
+const AGENTS_MD: &str = r#"# Agent notes
 
 Non-obvious things only. Anything derivable from the file tree does not belong
 here, and nothing here is repeated in another file.
@@ -1039,7 +843,8 @@ approves it; implementation builds it against that spec.
 bevel status                   where things stand
 bevel shape <n>                reserve an id, scaffold specs/NNNN-slug/
 bevel validate <id>            deterministic rules; draft -> review
-bevel gate <id>                exit 0 if this spec may be implemented
+bevel start <id>               claim an approved spec (checks the gate)
+bevel close <id>               finish it; enforces markers and verification
 bevel verify --affected        only what changed, plus its dependents
 bevel docs <lib> --spec <id>   version-pinned docs from the lockfile
 ```
@@ -1050,19 +855,49 @@ so an agent cannot run it. Ask the human, and say what changed.
 ## Full instructions
 
 ```
-bevel method shape
-bevel method implement
+bevel method show shape
+bevel method show implement
 ```
 
-Those print the same text `/shape` and `/implement` load, from the one method
-tree, so reading them can never disagree with running them.
+Those print the same text a `/shape` or `/implement` command would load, so the
+pipeline works in any agent whether or not it has slash commands.
 
 ## Gotchas
 
 <!-- Conventions and traps a competent newcomer to this repo would get wrong.
      Not a tutorial, and not anything the file tree already says.
      Keep this file under 50 lines. -->
+
+`bevel review`, `board`, `doctor --context --html` and `index --html` write
+HTML into `.bevel/cache/`. **Never read one back.** They exist for a human's
+eyes; a page costs several times the tokens of the markdown behind it, and
+every fact in one is available to you from `--json` or the source file. Point
+the user at the path and move on.
 "#;
+
+/// Which file `bevel notes` is printing the markdown for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Notes {
+    /// The body: what a project says about itself, for `AGENTS.md`.
+    Agents,
+    /// The pointer at it, for `CLAUDE.md`.
+    Claude,
+}
+
+/// The markdown for one of the two instruction files, to print.
+///
+/// A suggestion rather than an installation, and the whole of bevel's part in
+/// it. What a repository says about itself is the user's writing — the seed is
+/// only a good first draft of it — so bevel offers the text on stdout and stops
+/// there. `bevel notes > AGENTS.md` is one keystroke; a sync that decides on
+/// its own when to write, skip, move or preserve that file is a standing risk
+/// to prose nobody else can reconstruct.
+pub fn notes(which: Notes) -> &'static str {
+    match which {
+        Notes::Agents => AGENTS_MD,
+        Notes::Claude => CLAUDE_MD_POINTER,
+    }
+}
 
 /// Where each method file resolved from, for `doctor`. Without this, "why is my
 /// edit not taking effect?" is an afternoon.
@@ -1121,17 +956,9 @@ pub fn destinations(layers: &Layers, agents: &[Agent]) -> Vec<(String, String, P
             agent.skills().skills_dir(&cx),
         ));
         out.push((
-            name.clone(),
+            name,
             "subagents".into(),
             agent.subagents().subagents_dir(&cx),
-        ));
-        out.push((
-            name,
-            "instructions".into(),
-            PathBuf::from(match agent {
-                Agent::Claude => "AGENTS.md + CLAUDE.md pointer",
-                Agent::Opencode => "AGENTS.md",
-            }),
         ));
     }
     out
@@ -1209,8 +1036,8 @@ mod tests {
         assert!(!p.root.join(".claude/skills").exists());
         assert!(!p.root.join(".claude/agents").exists());
         assert!(!l.home.join(".agents").exists());
-        // What is genuinely project-scoped stays behind.
-        assert!(p.root.join("CLAUDE.md").is_file());
+        // What is genuinely project-scoped stays behind. Configuration only:
+        // the project's prose is printed by `bevel notes`, not installed.
         assert!(p.root.join(".claude/settings.json").is_file());
     }
 
@@ -1243,24 +1070,34 @@ mod tests {
         }
     }
 
-    /// AGENTS.md is loaded every turn by both agents, so it carries the
-    /// pipeline itself and pays for it in a budget `bevel doctor` enforces.
+    /// AGENTS.md is loaded every turn by both agents, so what bevel offers for
+    /// it carries the pipeline itself and stays inside the budget `bevel
+    /// doctor` enforces — offered text that would fail the audit on arrival is
+    /// a worse starting point than none.
     #[test]
-    fn agents_md_carries_the_runnable_pipeline_and_stays_in_budget() {
-        let (_t, p, l, m) = setup();
-        sync(Some(&p), &l, &m, &[Agent::Claude], false).unwrap();
-        let text = std::fs::read_to_string(p.root.join("AGENTS.md")).unwrap();
-        assert!(text.contains("bevel gate <id>"));
-        assert!(text.contains("bevel method shape"));
+    fn the_project_notes_are_printed_for_a_human_to_apply() {
+        let text = notes(Notes::Agents);
+        assert!(text.contains("bevel start <id>"));
+        // The exact invocation, not an approximation of it: `bevel method
+        // shape` is an unrecognised subcommand and exits 2, so a seed that
+        // says it sends every agent down a failing path on its first read.
+        assert!(text.contains("bevel method show shape"));
         // The reason approve is absent has to be stated, or an agent will try.
         assert!(text.contains("requires a terminal"));
         assert!(text.lines().count() <= 50, "{} lines", text.lines().count());
 
-        // And the pointer stays a pointer: if the body were duplicated here the
-        // two would be free to drift, which is what the move was for.
-        let claude = std::fs::read_to_string(p.root.join("CLAUDE.md")).unwrap();
-        assert!(claude.contains("AGENTS.md"));
-        assert!(!claude.contains("bevel gate <id>"));
+        // No marker. This text becomes the user's the moment they apply it, and
+        // a marker saying "edit the method layer, not this file" would be false
+        // on arrival — as well as inviting some future sync to clobber it.
+        assert!(!text.contains(MARKER));
+
+        // The pointer stays a pointer: if the body were duplicated there the two
+        // would be free to drift, which is the whole reason for the indirection.
+        let claude = notes(Notes::Claude);
+        assert!(claude.contains("[AGENTS.md](AGENTS.md)"));
+        assert!(!claude.contains("bevel start <id>"));
+        assert!(claude.lines().count() < 10, "the pointer grew a body");
+        assert!(!claude.contains(MARKER));
     }
 
     #[test]
@@ -1614,151 +1451,64 @@ mod tests {
         }
     }
 
-    /// One instruction in one place. The body moves to the file both agents
-    /// read first, and the Claude-named file becomes a pointer rather than a
-    /// second copy free to drift.
+    /// The invariant that replaced an entire migration, three of its helpers
+    /// and every test they needed: **sync does not touch these two files.**
+    ///
+    /// What is gone with them is the point. There is no byte comparison against
+    /// a frozen copy of what shipped, because nothing needs classifying. There
+    /// is no relocation of a user's own writing, because nothing is in the way.
+    /// There is no symlink check, because nothing is written through anything.
+    /// A file that cannot be decoded as UTF-8 needs no special case, because it
+    /// is never read. Each of those was a correct answer to a question this
+    /// design stopped asking.
     #[test]
-    fn the_project_body_lives_in_agents_md_with_claude_md_pointing_at_it() {
+    fn sync_never_writes_or_moves_the_projects_instruction_files() {
+        // Nothing where there was nothing, for either agent or both.
         let (_t, p, l, m) = setup();
-        sync(Some(&p), &l, &m, &[Agent::Claude, Agent::Opencode], false).unwrap();
-
-        let agents = std::fs::read_to_string(p.root.join("AGENTS.md")).unwrap();
-        let claude = std::fs::read_to_string(p.root.join("CLAUDE.md")).unwrap();
-
-        assert!(agents.contains("bevel gate <id>"));
-        // A pointer, not a copy. If the body appeared in both, the two would be
-        // free to disagree — which is the whole reason for the indirection.
-        assert!(claude.contains("[AGENTS.md](AGENTS.md)"));
-        assert!(!claude.contains("bevel gate <id>"));
-        assert!(claude.lines().count() < 10, "the pointer grew a body");
-
-        // opencode alone needs no CLAUDE.md at all: it reads AGENTS.md first.
-        let (_t2, p2, l2, m2) = setup();
-        sync(Some(&p2), &l2, &m2, &[Agent::Opencode], false).unwrap();
-        assert!(p2.root.join("AGENTS.md").is_file());
-        assert!(!p2.root.join("CLAUDE.md").exists());
-    }
-
-    /// The migration's sharp edge, and the only place bevel moves content a
-    /// user wrote. A `CLAUDE.md` byte-identical to `CLAUDE_MD` is generated and
-    /// may be replaced; anything else is moved whole to `AGENTS.md` with a
-    /// pointer left behind — never truncated, never overwritten onto an
-    /// existing `AGENTS.md`, and reported as a move.
-    #[test]
-    fn a_hand_edited_claude_md_is_moved_whole_and_never_silently_discarded() {
-        let (_t, p, l, m) = setup();
-        let mine = "# My notes\n\nDeploy with `make ship`. Never force-push main.\n";
-        std::fs::write(p.root.join("CLAUDE.md"), mine).unwrap();
-
-        let actions = sync(Some(&p), &l, &m, &[Agent::Claude], false).unwrap();
-
-        // Every byte survives, in the file both agents now read.
-        assert_eq!(
-            std::fs::read_to_string(p.root.join("AGENTS.md")).unwrap(),
-            mine
-        );
-        // Reported as a move, because bevel did not author this content and
-        // "wrote AGENTS.md" would claim that it had.
+        let actions = sync(Some(&p), &l, &m, &[Agent::Claude, Agent::Opencode], false).unwrap();
+        assert!(!p.root.join("AGENTS.md").exists());
+        assert!(!p.root.join("CLAUDE.md").exists());
         assert!(
-            actions.iter().any(|a| matches!(a, Action::Moved(from, to)
-                    if from.ends_with("CLAUDE.md") && to.ends_with("AGENTS.md"))),
+            !actions
+                .iter()
+                .any(|a| format!("{a}").contains("AGENTS.md")
+                    || format!("{a}").contains("CLAUDE.md")),
             "{actions:?}"
         );
-        // And the file Claude Code loads still leads somewhere.
-        assert!(std::fs::read_to_string(p.root.join("CLAUDE.md"))
-            .unwrap()
-            .contains("AGENTS.md"));
 
-        // Re-running must not move it a second time, nor overwrite what is now
-        // the user's AGENTS.md with the generated body.
-        let again = sync(Some(&p), &l, &m, &[Agent::Claude], false).unwrap();
-        assert!(!again.iter().any(|a| matches!(a, Action::Moved(_, _))));
-        assert_eq!(
-            std::fs::read_to_string(p.root.join("AGENTS.md")).unwrap(),
-            mine
-        );
-
-        // An AGENTS.md that is already theirs is never overwritten to make room
-        // for a migration: the whole resource steps aside instead.
+        // And nothing to what is already there — whoever wrote it, and whether
+        // it is the user's prose, bevel's own seed applied by hand, or bytes no
+        // decoder will accept.
         let (_t2, p2, l2, m2) = setup();
-        std::fs::write(p2.root.join("AGENTS.md"), "theirs\n").unwrap();
-        std::fs::write(p2.root.join("CLAUDE.md"), mine).unwrap();
-        sync(Some(&p2), &l2, &m2, &[Agent::Claude], false).unwrap();
+        let mine = "# My notes\n\nDeploy with `make ship`. Never force-push main.\n";
+        let latin1 = b"# nai\xefve notes\n";
+        std::fs::write(p2.root.join("AGENTS.md"), mine).unwrap();
+        std::fs::write(p2.root.join("CLAUDE.md"), latin1).unwrap();
+
+        sync(
+            Some(&p2),
+            &l2,
+            &m2,
+            &[Agent::Claude, Agent::Opencode],
+            false,
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(p2.root.join("AGENTS.md")).unwrap(),
-            "theirs\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(p2.root.join("CLAUDE.md")).unwrap(),
             mine
         );
+        assert_eq!(std::fs::read(p2.root.join("CLAUDE.md")).unwrap(), latin1);
 
-        // A generated CLAUDE.md, by contrast, is ours to replace.
+        // Applying the seed verbatim does not make it bevel's again. This is the
+        // case the old byte comparison existed to catch, and the one that made
+        // the seed unimprovable: it is now indistinguishable from any other
+        // file the user put there, which is exactly right.
         let (_t3, p3, l3, m3) = setup();
-        std::fs::write(p3.root.join("CLAUDE.md"), GENERATED_CLAUDE_MD).unwrap();
-        let acts = sync(Some(&p3), &l3, &m3, &[Agent::Claude], false).unwrap();
-        assert!(!acts.iter().any(|a| matches!(a, Action::Moved(_, _))));
-        assert!(std::fs::read_to_string(p3.root.join("AGENTS.md"))
-            .unwrap()
-            .contains(MARKER));
-        assert!(std::fs::read_to_string(p3.root.join("CLAUDE.md"))
-            .unwrap()
-            .contains("[AGENTS.md](AGENTS.md)"));
-
-        // Bytes we cannot decode are still bytes someone wrote. Classifying a
-        // failed read as "absent" would overwrite them, and the loss would be
-        // total and silent — the one failure mode with no symptom at all.
-        let (_t4, p4, l4, m4) = setup();
-        let latin1 = b"# nai\xefve notes\n";
-        std::fs::write(p4.root.join("CLAUDE.md"), latin1).unwrap();
-        sync(Some(&p4), &l4, &m4, &[Agent::Claude], false).unwrap();
-        assert_eq!(std::fs::read(p4.root.join("CLAUDE.md")).unwrap(), latin1);
-
-        let (_t5, p5, l5, m5) = setup();
-        std::fs::write(p5.root.join("AGENTS.md"), latin1).unwrap();
-        std::fs::write(p5.root.join("CLAUDE.md"), mine).unwrap();
-        sync(Some(&p5), &l5, &m5, &[Agent::Claude], false).unwrap();
-        assert_eq!(std::fs::read(p5.root.join("AGENTS.md")).unwrap(), latin1);
-
-        // AGENTS.md is seeded once and never rewritten: its whole purpose is
-        // the gotchas a user writes into it, and the marker identifies our seed
-        // rather than licensing us to replace what grew from it.
-        let (_t6, p6, l6, m6) = setup();
-        sync(Some(&p6), &l6, &m6, &[Agent::Claude], false).unwrap();
-        let grown = std::fs::read_to_string(p6.root.join("AGENTS.md"))
-            .unwrap()
-            .replace(
-                "<!-- Conventions",
-                "Never force-push main.\n\n<!-- Conventions",
-            );
-        std::fs::write(p6.root.join("AGENTS.md"), &grown).unwrap();
-        sync(Some(&p6), &l6, &m6, &[Agent::Claude], false).unwrap();
+        std::fs::write(p3.root.join("AGENTS.md"), notes(Notes::Agents)).unwrap();
+        sync(Some(&p3), &l3, &m3, &[Agent::Claude], false).unwrap();
         assert_eq!(
-            std::fs::read_to_string(p6.root.join("AGENTS.md")).unwrap(),
-            grown,
-            "a user's gotchas were reset by the next sync"
-        );
-    }
-
-    /// A `CLAUDE.md` symlinked at `AGENTS.md` is the pointer this design
-    /// describes, expressed the other way. Writing through it would replace the
-    /// body with a pointer to itself — and then restore and destroy it on
-    /// alternate runs.
-    #[test]
-    #[cfg(unix)]
-    fn the_pointer_is_never_written_through_a_symlink() {
-        let (_t, p, l, m) = setup();
-        sync(Some(&p), &l, &m, &[Agent::Claude], false).unwrap();
-        let body = std::fs::read_to_string(p.root.join("AGENTS.md")).unwrap();
-
-        std::fs::remove_file(p.root.join("CLAUDE.md")).unwrap();
-        std::os::unix::fs::symlink("AGENTS.md", p.root.join("CLAUDE.md")).unwrap();
-
-        sync(Some(&p), &l, &m, &[Agent::Claude], false).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(p.root.join("AGENTS.md")).unwrap(),
-            body,
-            "the body was written through the symlink"
+            std::fs::read_to_string(p3.root.join("AGENTS.md")).unwrap(),
+            notes(Notes::Agents)
         );
     }
 

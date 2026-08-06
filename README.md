@@ -36,6 +36,18 @@ Any *other* agent still runs the pipeline through `AGENTS.md`, the artifacts on
 disk and this binary, because every phase writes a file and the next one reads
 it. What it loses is context isolation, not function.
 
+**`sync` does not write `AGENTS.md` or `CLAUDE.md`.** What a repository says
+about itself is your writing, so bevel prints a starting point and stops:
+
+```
+bevel notes > AGENTS.md        # the body: the loop, and your own gotchas
+bevel notes claude > CLAUDE.md # a two-line pointer at it, for Claude Code
+```
+
+Run them once, edit freely, and no later `bevel sync` will disagree with what
+you wrote. `bevel doctor --context` still counts the lines against the 50-line
+budget, because that file enters every turn whoever authored it.
+
 **No instruction text is copied into anyone's prompt format.** The skills
 install once into `~/.claude/skills`, which opencode scans too, and `bevel
 method show shape` prints the same text from the one method tree. Only a

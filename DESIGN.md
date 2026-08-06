@@ -318,7 +318,7 @@ Monorepo always. Concretely:
 ```
 monorepo/
 ├── INBOX.md                  # ONE inbox, at the root
-├── AGENTS.md                 # root: cross-cutting gotchas only
+├── AGENTS.md                 # root: cross-cutting gotchas only — yours, from `bevel notes`
 ├── CLAUDE.md                 # 3-line stub pointing at AGENTS.md
 ├── docs/
 │   └── architecture.md       # the design record (see §4)
@@ -989,18 +989,45 @@ field guide's pattern: *compile artifacts and hand them to a fresh session*.
 | Worktrees | Everything in the main tree |
 
 **Single source:** content lives in the built-in/user method layers; `bevel sync` projects it
-into `~/.claude/skills/`, `~/.claude/agents/`, `~/.config/opencode/agents/`,
-`.claude/settings.json` and `AGENTS.md`. Every generated file carries a marker comment, and a
-file without one is treated as the user's and never clobbered — which is why the one file that
-was written *without* a marker, `CLAUDE.md`, needed a byte comparison against its old contents
-before it could be migrated at all.
+into `~/.claude/skills/`, `~/.claude/agents/`, `~/.config/opencode/agents/` and
+`.claude/settings.json`. Every generated file carries a marker comment, and a file without one
+is treated as the user's and never clobbered.
 
 Symlinks were considered and are not used: a subagent rendered for opencode is a *translation*
 of the source, not a copy of it, so there is nothing for a symlink to point at.
 
+**`sync` does not write `AGENTS.md` or `CLAUDE.md`. `bevel notes` prints them and the user
+applies what they want.** That list above is configuration — directories under `~`, one JSON
+file — and those two are prose a project writes about itself. Treating them as generated output
+was the design error, and every sharp edge in that code was a symptom of it: `CLAUDE.md` shipped
+without a marker, so classifying it needed a byte comparison against a frozen copy of what
+bevel used to write; the seed and that fingerprint were the same constant, so improving the seed
+silently reclassified every file already on disk; getting it wrong meant *relocating a user's
+own writing*; and a `CLAUDE.md` symlinked at `AGENTS.md` had to be detected before it was
+followed or the body was destroyed on alternate runs. Four hazards, one cause.
+
+Printing costs a redirect and removes all four:
+
+```
+bevel notes > AGENTS.md
+bevel notes claude > CLAUDE.md
+```
+
+There is nothing to classify, because bevel never reads these files back; nothing to migrate,
+because it never wrote them; and nothing to clobber. The budget in §13 is what keeps them
+honest afterwards, and it applies to a hand-written file exactly as it did to a generated one.
+
+**This breaks projects initialised before the change** — their `AGENTS.md` and `CLAUDE.md` carry
+a generated marker that now means nothing, and a stale command list that no `sync` will refresh.
+The fix is the same one line: `bevel notes > AGENTS.md`, then re-add your own gotchas. Accepted
+deliberately, because a migration path here would be one more piece of code reaching into files
+this section has just established are not bevel's to touch.
+
 **`CLAUDE.md` is a three-line stub pointing at `AGENTS.md`.** Anti-duplication rule: the same
 instruction must never exist in two places. The article lists this as an explicit anti-pattern,
-and in practice it is how a harness starts contradicting itself.
+and in practice it is how a harness starts contradicting itself. That is why `bevel notes claude`
+prints a pointer and not a second copy of the body — but it is a recommendation now, and a user
+who wants one file, or neither, is not fighting the tool to get it.
 
 ---
 
@@ -1107,8 +1134,9 @@ quietly; only the last one leaves a trace.
 ## 11. The CLI
 
 ```
-bevel project init --monorepo  # scaffold .bevel/, INBOX.md, specs/, AGENTS.md
-bevel sync                     # install the method into ~/.claude, and the project's notes
+bevel project init --monorepo  # scaffold .bevel/, INBOX.md, specs/
+bevel sync                     # install the method into ~/.claude and .claude/settings.json
+bevel notes [agents|claude]    # print the project's notes; applying them is yours (§9)
 bevel doctor                   # versions, workspace map, packs, Context7, broken gates
 bevel doctor --context         # ← the harness token budget (§13)
 bevel status                   # fixed-size summary — never a list (see below)
