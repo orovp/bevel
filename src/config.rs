@@ -159,6 +159,7 @@ mod tests {
             config: tmp.path().join("nope"),
             cache: tmp.path().join("cache"),
             home: tmp.path().join("home"),
+            opencode: tmp.path().join("home/.config/opencode"),
         };
         let cfg = Config::load(&layers).unwrap();
         assert_eq!(cfg.context7.base_url, "https://context7.com/api/v1");
@@ -175,6 +176,7 @@ mod tests {
             config: tmp.path().to_path_buf(),
             cache: tmp.path().join("cache"),
             home: tmp.path().join("home"),
+            opencode: tmp.path().join("home/.config/opencode"),
         };
         let cfg = Config::load(&layers).unwrap();
         assert_eq!(cfg.context7.tokens, 999);

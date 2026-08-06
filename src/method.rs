@@ -314,6 +314,7 @@ mod tests {
             config: tmp.join("cfg"),
             cache: tmp.join("cache"),
             home: tmp.join("home"),
+            opencode: tmp.join("home/.config/opencode"),
         }
     }
 

@@ -299,6 +299,7 @@ mod tests {
             config: tmp.path().join("cfg"),
             cache: tmp.path().join("cache"),
             home: tmp.path().join("home"),
+            opencode: tmp.path().join("home/.config/opencode"),
         };
         let method = crate::method::Source {
             kind: crate::method::Kind::Local,

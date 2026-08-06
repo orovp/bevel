@@ -1,0 +1,9 @@
+# Approval record. Versioned deliberately: an approval is a historical
+# fact about the project, and it has to survive a clone and show up in
+# a diff. Written by `bevel approve`.
+
+[spec.0001]
+hash = "sha256:3bb2da9bc49ba525b9ad109110313bb56418a7a788010b5426416ee39b856916"
+approved_at = "2026-08-05T21:45:16.934282256+00:00"
+approved_by = "orovp"
+bevel_version = "0.1.0"

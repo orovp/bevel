@@ -170,6 +170,10 @@ enum MethodCmd {
 
 #[derive(Args)]
 struct SyncArgs {
+    /// Which agents to render for, comma-separated. Defaults to whichever are
+    /// detected in your home directory
+    #[arg(long, value_name = "LIST", value_delimiter = ',')]
+    agent: Vec<String>,
     /// Install the format-on-write, session-start and stop hooks
     #[arg(long)]
     hooks: bool,
@@ -502,8 +506,27 @@ fn cmd_sync(args: SyncArgs) -> Result<ExitCode> {
         source = method::resolve(p.as_ref(), &layers, &cfg.method);
     }
 
+    // An explicit list beats detection, and an unknown name in it stops the
+    // run rather than rendering nothing for it and reporting success.
+    let agents = if args.agent.is_empty() {
+        sync::detect(&layers)
+    } else {
+        args.agent
+            .iter()
+            .map(|n| sync::Agent::parse(n))
+            .collect::<Result<Vec<_>>>()?
+    };
+
     println!("method: {}", source.origin);
-    for action in sync::sync(p.as_ref(), &layers, &source, args.hooks)? {
+    println!(
+        "agents: {}",
+        agents
+            .iter()
+            .map(|a| a.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for action in sync::sync(p.as_ref(), &layers, &source, &agents, args.hooks)? {
         println!("{action}");
     }
     // Say which half ran. Silence here reads as "everything is installed", and
@@ -511,7 +534,7 @@ fn cmd_sync(args: SyncArgs) -> Result<ExitCode> {
     if p.is_none() {
         println!(
             "\nno project here, so only the machine-wide method was installed.\n  \
-             run `bevel project init` inside a repository for its CLAUDE.md"
+             run `bevel project init` inside a repository for its AGENTS.md"
         );
     }
     Ok(ExitCode::SUCCESS)
@@ -911,6 +934,25 @@ fn cmd_doctor(args: DoctorArgs) -> Result<ExitCode> {
     println!("\nskills");
     for (name, path, which) in sync::method_sources(&layers, &m) {
         println!("  {name:<27} {which:<8} {}", path.display());
+    }
+
+    // Where each kind lands per agent. opencode reads Claude Code's skills
+    // directory, and if that ever stops being true nothing breaks loudly — the
+    // skills simply stop loading. This is what makes that visible.
+    let agents = sync::detect(&layers);
+    println!(
+        "\nagents     {} detected",
+        agents
+            .iter()
+            .map(|a| a.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for (agent, kind, dest) in sync::destinations(&layers, &agents) {
+        println!("  {agent:<10} {kind:<13} {}", dest.display());
+    }
+    if agents.contains(&sync::Agent::Opencode) {
+        println!("  opencode subagents require opencode v2 or newer");
     }
 
     // A gate that silently stopped matching is worse than one that never existed.

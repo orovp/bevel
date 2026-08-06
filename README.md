@@ -17,20 +17,32 @@ Both install a binary called `bevel`. Two channels because one network may be
 closed: the crate has to exist anyway to build the npm binaries, so the fallback
 costs one `cargo publish`.
 
-## Any agent, not just Claude Code
+## Claude Code and opencode
 
 ```
 bevel sync                     # renders for whichever agents it detects
-bevel sync --agent cursor,codex --hooks
+bevel sync --agent opencode --hooks
 ```
 
-Claude Code is tier 1 — skills, seven subagents, and three non-blocking hooks.
-Everything else is tier 0: `AGENTS.md`, the artifacts on disk, and this binary,
-which is enough because every phase writes a file and the next one reads it.
+Two agents, named because they are the two that are rendered for. An unknown
+name is an error rather than a silent no-op — a flag that accepts `cursor` and
+then writes nothing for it reads exactly like success.
 
-**The skills are not copied into each agent's prompt format.** `bevel method
-show shape` prints them from the one method tree, so there is nothing to drift.
-That is what `AGENTS.md` points a tier-0 agent at.
+Both get the five skills and the seven subagents. Claude Code additionally gets
+three non-blocking hooks; opencode expresses hooks as JavaScript plugins, and a
+Rust binary generating JS for three conveniences is not a trade worth making.
+
+Any *other* agent still runs the pipeline through `AGENTS.md`, the artifacts on
+disk and this binary, because every phase writes a file and the next one reads
+it. What it loses is context isolation, not function.
+
+**No instruction text is copied into anyone's prompt format.** The skills
+install once into `~/.claude/skills`, which opencode scans too, and `bevel
+method show shape` prints the same text from the one method tree. Only a
+subagent's *frontmatter* is translated — opencode has no `.claude/agents`
+fallback, so the seven definitions are rendered into `~/.config/opencode/agents`
+with their tool grants mapped to opencode's `permissions`. That needs opencode
+v2 or newer, and `bevel doctor` says so.
 
 ## The loop
 

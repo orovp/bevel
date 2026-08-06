@@ -1,14 +1,21 @@
-//! Installing the method where Claude Code reads it (DESIGN.md §9).
+//! Installing the method where each agent reads it (DESIGN.md §9).
 //!
-//! Claude Code is the only target. Other agents were supported here once, in
-//! the abstract, before any of them had been used against this pipeline for
-//! real — which is how you end up maintaining five renderers that are each
-//! wrong in a way nobody has noticed. When a second agent earns its place, the
-//! split it needs will be known rather than guessed.
+//! Two agents, and the split between them is known rather than guessed — which
+//! was the condition set when five speculative renderers were deleted from this
+//! file. What arrived with the second agent was not a fifth of a pattern but
+//! the observation that agents differ *per resource kind*, not wholesale:
+//! opencode scans `~/.claude/skills` and needs no skill rendering at all, has
+//! no `.claude/agents` fallback and needs every subagent translated, and reads
+//! `AGENTS.md` where Claude Code reads `CLAUDE.md`. Hence one trait per kind
+//! rather than one renderer per agent.
 //!
-//! What survives that cut is the part that was never agent-specific: the method
-//! has one source on disk, and `bevel method shape` prints it. Nothing is
-//! transliterated into anyone's prompt format, so there is nothing to drift.
+//! A third agent will not fit these traits exactly, and that is expected: they
+//! are internal, promise nothing, and the third is free to reshape them.
+//!
+//! What was never agent-specific survives untouched: the method has one source
+//! on disk, and `bevel method shape` prints it. Only the *frontmatter* of a
+//! subagent is transliterated; no instruction text is ever copied into anyone's
+//! prompt format, so there is still nothing to drift.
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
@@ -74,7 +81,21 @@ const COMMAND_PREFIXES: [&str; 2] = ["bevel ", "harness "];
 pub enum Action {
     Wrote(String),
     Removed(String),
+    /// Content relocated rather than generated. Distinct from `Wrote` because
+    /// the only file this happens to is one the user wrote themselves, and
+    /// "wrote CLAUDE.md" would describe that as though bevel had authored it.
+    Moved(String, String),
     Skipped(String, &'static str),
+}
+
+impl Action {
+    /// The file this action is about — its destination, for a move.
+    fn path(&self) -> &str {
+        match self {
+            Action::Wrote(p) | Action::Removed(p) | Action::Skipped(p, _) => p,
+            Action::Moved(_, to) => to,
+        }
+    }
 }
 
 impl std::fmt::Display for Action {
@@ -82,10 +103,136 @@ impl std::fmt::Display for Action {
         match self {
             Action::Wrote(p) => write!(f, "  wrote   {p}"),
             Action::Removed(p) => write!(f, "  removed {p}"),
+            Action::Moved(from, to) => write!(f, "  moved   {from} -> {to}"),
             Action::Skipped(p, why) => write!(f, "  skipped {p} ({why})"),
         }
     }
 }
+
+// ------------------------------------------------------------------- agents
+
+/// The agents bevel renders for.
+///
+/// Two, and a third is a decision rather than a line: the traits below took
+/// their shape from these two, and a third will ask questions neither did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Agent {
+    Claude,
+    Opencode,
+}
+
+impl Agent {
+    pub const ALL: [Agent; 2] = [Agent::Claude, Agent::Opencode];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Agent::Claude => "claude",
+            Agent::Opencode => "opencode",
+        }
+    }
+
+    /// A directory whose presence suggests this agent is installed.
+    fn marker(self, layers: &Layers) -> PathBuf {
+        match self {
+            Agent::Claude => layers.claude_home(),
+            Agent::Opencode => layers.opencode_home(),
+        }
+    }
+
+    /// An unsupported name is an error, never a silent no-op.
+    ///
+    /// The deleted multi-agent code accepted `codex` and `opencode` and then
+    /// rendered nothing for either, which reads as success and is not. Naming
+    /// what is supported costs one line and saves that whole class of report.
+    pub fn parse(name: &str) -> Result<Self> {
+        let want = name.trim().to_ascii_lowercase();
+        Agent::ALL
+            .into_iter()
+            .find(|a| a.as_str() == want)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown agent `{name}`\n  bevel renders for: {}",
+                    Agent::ALL
+                        .iter()
+                        .map(|a| a.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+    }
+
+    fn skills(self) -> &'static dyn SkillTarget {
+        match self {
+            Agent::Claude => &ClaudeCode,
+            Agent::Opencode => &OpenCode,
+        }
+    }
+
+    fn subagents(self) -> &'static dyn SubagentTarget {
+        match self {
+            Agent::Claude => &ClaudeCode,
+            Agent::Opencode => &OpenCode,
+        }
+    }
+
+    fn instructions(self) -> &'static dyn InstructionTarget {
+        match self {
+            Agent::Claude => &ClaudeCode,
+            Agent::Opencode => &OpenCode,
+        }
+    }
+}
+
+/// Which agents to render for, when the user did not say.
+///
+/// Additive: two installed means both rendered. Falling back to Claude Code
+/// rather than to nothing keeps a fresh machine — where neither directory
+/// exists yet — from installing nothing at all and reporting success.
+pub fn detect(layers: &Layers) -> Vec<Agent> {
+    let found: Vec<Agent> = Agent::ALL
+        .into_iter()
+        .filter(|a| a.marker(layers).is_dir())
+        .collect();
+    if found.is_empty() {
+        vec![Agent::Claude]
+    } else {
+        found
+    }
+}
+
+// -------------------------------------------------------------- the targets
+
+/// What every renderer needs, bundled so the traits take one argument.
+struct Cx<'a> {
+    project: Option<&'a Project>,
+    layers: &'a Layers,
+    source: &'a Source,
+}
+
+/// One trait per resource kind rather than one trait with three methods, so
+/// that adding an agent forces an answer to each question separately instead
+/// of inheriting a default nobody considered for it.
+trait SkillTarget {
+    /// Where this agent loads skills from. Two agents may name the same
+    /// directory, and `sync` installs into it once.
+    fn skills_dir(&self, cx: &Cx) -> PathBuf;
+}
+
+trait SubagentTarget {
+    /// Where this agent loads subagent definitions from. Separate from
+    /// `subagents` so `doctor` reports the directory the renderer will
+    /// actually use, rather than a second copy of the same mapping that can
+    /// drift from it.
+    fn subagents_dir(&self, cx: &Cx) -> PathBuf;
+    fn subagents(&self, cx: &Cx) -> Result<Vec<Action>>;
+}
+
+trait InstructionTarget {
+    fn instructions(&self, cx: &Cx) -> Result<Vec<Action>>;
+}
+
+struct ClaudeCode;
+struct OpenCode;
 
 /// Install the method.
 ///
@@ -98,68 +245,166 @@ pub fn sync(
     project: Option<&Project>,
     layers: &Layers,
     source: &Source,
+    agents: &[Agent],
     hooks: bool,
 ) -> Result<Vec<Action>> {
     if !source.is_usable() {
         bail!("{}", crate::method::missing_help(source, layers));
     }
-    // The machine's half first: it is the half that always applies.
-    let mut actions = sync_machine(project, layers, source)?;
-    actions.extend(sync_project(project, layers, hooks)?);
-    Ok(actions)
-}
-
-/// Skills and subagents, installed once per machine.
-///
-/// The split is by lifetime, not by feature. This is the method, and the method
-/// is the same text whichever project you are standing in — a copy per project
-/// would be N copies of one file, free to drift.
-fn sync_machine(
-    project: Option<&Project>,
-    layers: &Layers,
-    source: &Source,
-) -> Result<Vec<Action>> {
-    let mut actions = Vec::new();
-
-    for name in SKILLS {
-        let dir = skill_dir(layers, source, name)
-            .with_context(|| format!("skill `{name}` is missing from the method tree"))?;
-        let dest = layers.claude_skills().join(name);
-        actions.extend(install_skill(&dir, &dest, project, layers)?);
-    }
-
-    for name in AGENT_DEFS {
-        let body = agent_body(layers, source, name)
-            .with_context(|| format!("subagent `{name}` is missing from the method tree"))?;
-        let dest = layers.claude_agents().join(format!("{name}.md"));
-        actions.push(write_generated(&dest, &body, project, layers)?);
-    }
-
-    Ok(actions)
-}
-
-/// What a project needs said about *itself*, which is nothing at all when there
-/// is no project to say it about.
-fn sync_project(project: Option<&Project>, layers: &Layers, hooks: bool) -> Result<Vec<Action>> {
-    let Some(p) = project else {
-        return Ok(Vec::new());
-    };
-
-    // The body, in the file Claude Code already loads every turn. One file
-    // rather than a file plus a pointer to it: with a single agent to serve,
-    // the indirection bought nothing and cost a hop.
-    let mut actions = vec![write_if_absent(
-        &p.root.join("CLAUDE.md"),
-        CLAUDE_MD,
+    let cx = Cx {
         project,
         layers,
-    )?];
+        source,
+    };
+    let mut actions = Vec::new();
 
-    // Project-scoped on purpose, unlike everything in sync_machine: these hooks
-    // shell out to `bevel`, and at user level they would fire in every
-    // repository on the machine, including those with no project to find.
-    actions.push(sync_settings(p, layers, hooks)?);
+    // Skills first, and once per destination however many agents share it.
+    // opencode reads Claude Code's directory, so `--agent opencode` alone still
+    // has to install there — nothing else writes it, and the two skills that
+    // are the pipeline would otherwise exist nowhere.
+    let mut installed_into: Vec<PathBuf> = Vec::new();
+    for agent in agents {
+        let dir = agent.skills().skills_dir(&cx);
+        if installed_into.contains(&dir) {
+            continue;
+        }
+        actions.extend(install_skills(&dir, &cx)?);
+        installed_into.push(dir);
+    }
+
+    for agent in agents {
+        actions.extend(agent.subagents().subagents(&cx)?);
+    }
+    for agent in agents {
+        actions.extend(agent.instructions().instructions(&cx)?);
+    }
+
+    // Project-scoped on purpose, unlike everything above: these hooks shell out
+    // to `bevel`, and at user level they would fire in every repository on the
+    // machine, including those with no project to find. Claude Code only —
+    // opencode expresses the same thing as a JavaScript plugin, which is a
+    // Rust binary generating JS for three non-blocking conveniences.
+    if agents.contains(&Agent::Claude) {
+        if let Some(p) = project {
+            actions.push(sync_settings(p, layers, hooks)?);
+        }
+    }
     Ok(actions)
+}
+
+/// The five skills, into one directory.
+fn install_skills(dest_root: &Path, cx: &Cx) -> Result<Vec<Action>> {
+    let mut actions = Vec::new();
+    for name in SKILLS {
+        let dir = skill_dir(cx.layers, cx.source, name)
+            .with_context(|| format!("skill `{name}` is missing from the method tree"))?;
+        let dest = dest_root.join(name);
+        actions.extend(install_skill(&dir, &dest, cx.project, cx.layers)?);
+    }
+    Ok(actions)
+}
+
+impl SkillTarget for ClaudeCode {
+    fn skills_dir(&self, cx: &Cx) -> PathBuf {
+        cx.layers.claude_skills()
+    }
+}
+
+/// opencode scans `~/.claude/skills` among its own global skill paths, so the
+/// method is already where it looks. Naming that directory here rather than
+/// writing a second copy into `~/.config/opencode/skills` is the whole point:
+/// two copies of one SKILL.md is exactly the drift this design exists to stop.
+///
+/// If a future opencode stops reading it, this is the line to change — and
+/// `bevel doctor` prints the resolved directory so the failure is visible
+/// rather than silent.
+impl SkillTarget for OpenCode {
+    fn skills_dir(&self, cx: &Cx) -> PathBuf {
+        cx.layers.claude_skills()
+    }
+}
+
+impl SubagentTarget for ClaudeCode {
+    fn subagents_dir(&self, cx: &Cx) -> PathBuf {
+        cx.layers.claude_agents()
+    }
+
+    fn subagents(&self, cx: &Cx) -> Result<Vec<Action>> {
+        let mut actions = Vec::new();
+        for name in AGENT_DEFS {
+            let body = agent_body(cx.layers, cx.source, name)
+                .with_context(|| format!("subagent `{name}` is missing from the method tree"))?;
+            let dest = self.subagents_dir(cx).join(format!("{name}.md"));
+            actions.push(write_generated(&dest, &body, cx.project, cx.layers)?);
+        }
+        Ok(actions)
+    }
+}
+
+impl SubagentTarget for OpenCode {
+    fn subagents_dir(&self, cx: &Cx) -> PathBuf {
+        cx.layers.opencode_agents()
+    }
+
+    fn subagents(&self, cx: &Cx) -> Result<Vec<Action>> {
+        let mut actions = Vec::new();
+        for name in AGENT_DEFS {
+            let body = agent_body(cx.layers, cx.source, name)
+                .with_context(|| format!("subagent `{name}` is missing from the method tree"))?;
+            let rendered = render_subagent_for_opencode(&body)
+                .with_context(|| format!("cannot render subagent `{name}` for opencode"))?;
+            let dest = self.subagents_dir(cx).join(format!("{name}.md"));
+            actions.push(write_generated(&dest, &rendered, cx.project, cx.layers)?);
+        }
+        Ok(actions)
+    }
+}
+
+impl InstructionTarget for ClaudeCode {
+    fn instructions(&self, cx: &Cx) -> Result<Vec<Action>> {
+        let Some(p) = cx.project else {
+            return Ok(Vec::new());
+        };
+        let Instructions {
+            mut actions,
+            managed,
+        } = ensure_agents_md(p, cx)?;
+        // When `AGENTS.md` is the user's, the whole resource steps aside: a
+        // pointer at a file bevel does not manage is an unrequested file in
+        // someone's repository, pointing somewhere we cannot vouch for.
+        if !managed {
+            return Ok(actions);
+        }
+        // The pointer, in the file Claude Code loads every turn. Two lines
+        // rather than a second copy of the body: one instruction lives in one
+        // place, and a pointer cannot disagree with what it points at.
+        //
+        // Generated rather than written-if-absent, so a later migration can
+        // still tell it from a file someone edited — the distinction this
+        // whole `AGENTS.md` move existed to restore.
+        let claude = p.root.join("CLAUDE.md");
+        let rel = display(cx.project, cx.layers, &claude);
+        if !actions.iter().any(|a| a.path() == rel) && !is_symlink(&claude) {
+            actions.push(write_generated(
+                &claude,
+                CLAUDE_MD_POINTER,
+                cx.project,
+                cx.layers,
+            )?);
+        }
+        Ok(actions)
+    }
+}
+
+/// opencode reads `AGENTS.md` first and falls back to `CLAUDE.md` only when
+/// there is none. It needs the body and nothing else.
+impl InstructionTarget for OpenCode {
+    fn instructions(&self, cx: &Cx) -> Result<Vec<Action>> {
+        let Some(p) = cx.project else {
+            return Ok(Vec::new());
+        };
+        Ok(ensure_agents_md(p, cx)?.actions)
+    }
 }
 
 /// A skill's directory: user layer first, then the method tree.
@@ -392,21 +637,251 @@ fn write_generated(
     Ok(Action::Wrote(rel))
 }
 
-fn write_if_absent(
-    path: &Path,
-    body: &str,
-    project: Option<&Project>,
-    layers: &Layers,
-) -> Result<Action> {
-    let rel = display(project, layers, path);
-    if path.exists() {
-        return Ok(Action::Skipped(rel, "already present"));
+/// What `ensure_agents_md` concluded, because the caller's next move depends
+/// on it: the `CLAUDE.md` pointer is only bevel's to maintain when `AGENTS.md`
+/// is bevel's to maintain.
+struct Instructions {
+    actions: Vec<Action>,
+    /// False when `AGENTS.md` belongs to the user, in which case the whole
+    /// resource steps aside rather than adding a pointer to a file bevel does
+    /// not manage.
+    managed: bool,
+}
+
+/// Put the project's instructions in `AGENTS.md`, migrating what is there.
+///
+/// `CLAUDE.md` carries no generated marker — the code that wrote it appended
+/// none — so the marker convention cannot classify it and a byte comparison
+/// against the text we used to write does.
+///
+/// | `AGENTS.md` | `CLAUDE.md` | outcome |
+/// |---|---|---|
+/// | present | any | left exactly as it is |
+/// | absent | absent | body written |
+/// | absent | what we used to write | body written, pointer replaces it |
+/// | absent | anything else | moved whole, pointer left behind |
+///
+/// **Existence, not readability, is what the first row turns on.** A file that
+/// cannot be decoded as UTF-8 is still a file someone wrote; treating a failed
+/// read as "absent" would overwrite it, and that is a byte-for-byte data loss
+/// with no symptom. The code this replaced used `path.exists()` and was right
+/// to.
+///
+/// The last row is the only place in this design where bevel relocates content
+/// a user wrote, which is why it is reported as a move and why an existing
+/// `AGENTS.md` is never overwritten to make room for it.
+fn ensure_agents_md(p: &Project, cx: &Cx) -> Result<Instructions> {
+    let agents = p.root.join("AGENTS.md");
+    let claude = p.root.join("CLAUDE.md");
+    let rel = |path: &Path| display(cx.project, cx.layers, path);
+
+    // Seeded once and never rewritten. `AGENTS.md` is the project's own notes
+    // file — its whole purpose is the gotchas a user writes into it — so the
+    // marker identifies our seed and is never licence to replace what someone
+    // has since written over it.
+    if exists(&agents) {
+        let ours = std::fs::read_to_string(&agents).is_ok_and(|t| t == generated(AGENTS_MD));
+        return Ok(Instructions {
+            actions: vec![Action::Skipped(
+                rel(&agents),
+                if ours { "unchanged" } else { "already present" },
+            )],
+            managed: ours,
+        });
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+
+    // Writing through a symlink replaces its target, and a `CLAUDE.md`
+    // symlinked to `AGENTS.md` is exactly the pointer this design describes —
+    // so following it would destroy the body on every sync.
+    if is_symlink(&claude) {
+        return Ok(Instructions {
+            actions: vec![Action::Skipped(rel(&claude), "symlink")],
+            managed: false,
+        });
     }
-    std::fs::write(path, body).with_context(|| format!("cannot write {}", path.display()))?;
-    Ok(Action::Wrote(rel))
+
+    let existing = match std::fs::read_to_string(&claude) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Instructions {
+                actions: vec![write_generated(&agents, AGENTS_MD, cx.project, cx.layers)?],
+                managed: true,
+            })
+        }
+        // Present, and not text we can classify. Theirs by default: the only
+        // safe assumption about bytes we cannot read is that someone wants them.
+        Err(_) => {
+            return Ok(Instructions {
+                actions: vec![Action::Skipped(rel(&claude), "unreadable")],
+                managed: false,
+            })
+        }
+    };
+
+    if existing == GENERATED_CLAUDE_MD {
+        // Ours, so there is nothing to preserve: write the body where it now
+        // belongs and let the pointer replace the copy.
+        return Ok(Instructions {
+            actions: vec![
+                write_generated(&agents, AGENTS_MD, cx.project, cx.layers)?,
+                replace(&claude, CLAUDE_MD_POINTER, cx)?,
+            ],
+            managed: true,
+        });
+    }
+
+    // Theirs. Every byte moves, and the pointer goes back in its place so the
+    // file Claude Code loads still leads somewhere.
+    std::fs::write(&agents, &existing)
+        .with_context(|| format!("cannot write {}", agents.display()))?;
+    Ok(Instructions {
+        actions: vec![
+            Action::Moved(rel(&claude), rel(&agents)),
+            replace(&claude, CLAUDE_MD_POINTER, cx)?,
+        ],
+        managed: true,
+    })
+}
+
+/// Present on disk, whatever it is and whether or not it can be read — a
+/// broken symlink included, which `Path::exists` would call absent.
+fn exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// A generated file's full contents, marker and all.
+fn generated(body: &str) -> String {
+    format!("{}\n\n{MARKER}\n", body.trim_end())
+}
+
+// --------------------------------------------------- opencode frontmatter
+
+/// What our subagent definitions declare.
+#[derive(serde::Deserialize)]
+struct MethodFront {
+    description: String,
+    /// A comma-separated scalar in every method file, not a YAML list.
+    #[serde(default)]
+    tools: Option<String>,
+}
+
+/// What opencode v2 reads. `name` is absent because opencode takes the id from
+/// the filename, and `model` because `opus` and `fable` are Claude Code
+/// shorthands rather than the `provider/model-id` opencode resolves — a
+/// translated guess would pin someone else's model choice, and a literal copy
+/// would name a model that does not exist.
+#[derive(serde::Serialize)]
+struct OpencodeFront {
+    description: String,
+    mode: &'static str,
+    /// Absent when the source declared no `tools:` at all.
+    ///
+    /// An omitted `tools:` means "inherit everything" where these files come
+    /// from, so emitting a closed allow-list for it would silently strip a
+    /// subagent of every capability — the same unannounced narrowing that
+    /// makes an unmapped tool name a hard error below. Omitting the key hands
+    /// the decision back to opencode's own default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    permissions: Option<Vec<Permission>>,
+}
+
+#[derive(serde::Serialize)]
+struct Permission {
+    action: String,
+    resource: &'static str,
+    effect: &'static str,
+}
+
+/// serde_yaml 0.9 emits no comments, so the version note is spliced in by hand
+/// the way `Spec::save` builds its own fence.
+const OPENCODE_V2_NOTE: &str = "# generated by bevel — requires opencode v2 or newer";
+
+fn render_subagent_for_opencode(body: &str) -> Result<String> {
+    let (yaml, markdown) = crate::spec::split_frontmatter(body)?;
+    let front: MethodFront = serde_yaml::from_str(yaml)?;
+    let rendered = serde_yaml::to_string(&OpencodeFront {
+        description: front.description,
+        mode: "subagent",
+        permissions: permissions_for(front.tools.as_deref())?,
+    })?;
+    Ok(format!(
+        "---\n{OPENCODE_V2_NOTE}\n{rendered}---\n{markdown}"
+    ))
+}
+
+/// An allow-list closed by a terminal deny, never a permissive default with
+/// exceptions bolted on.
+///
+/// The two differ precisely on the property the subagents exist for: a
+/// reviewer that gained a tool nobody granted is the failure. Only the closed
+/// form makes that impossible, and the order matters because opencode resolves
+/// by last match.
+fn permissions_for(tools: Option<&str>) -> Result<Option<Vec<Permission>>> {
+    let Some(tools) = tools else {
+        return Ok(None);
+    };
+    let mut out = Vec::new();
+    for tool in tools.split(',') {
+        let tool = tool.trim();
+        if tool.is_empty() {
+            continue;
+        }
+        let (action, resource) = opencode_action(tool)?;
+        out.push(Permission {
+            action: action.into(),
+            resource,
+            effect: "allow",
+        });
+    }
+    if out.is_empty() {
+        return Ok(None);
+    }
+    out.push(Permission {
+        action: "*".into(),
+        resource: "*",
+        effect: "deny",
+    });
+    Ok(Some(out))
+}
+
+/// Our tool names, in opencode's vocabulary.
+///
+/// An unrecognised tool is an error rather than a silently dropped line. The
+/// quiet alternative would narrow a subagent's capabilities without saying so,
+/// which is indistinguishable from the translation working — and `sync` is a
+/// command run deliberately, so a loud failure here is one someone can fix.
+fn opencode_action(tool: &str) -> Result<(&'static str, &'static str)> {
+    Ok(match tool {
+        "Read" => ("read", "**"),
+        "Grep" => ("grep", "**"),
+        "Glob" => ("glob", "**"),
+        // opencode gates its `write` tool behind the `edit` permission, so
+        // granting `edit` is what actually makes writing possible.
+        "Write" | "Edit" => ("edit", "**"),
+        "WebFetch" => ("webfetch", "*"),
+        "Bash" => ("bash", "*"),
+        other => bail!(
+            "no opencode equivalent for tool `{other}`\n  \
+             add one to `opencode_action` rather than letting the subagent \
+             quietly lose the capability"
+        ),
+    })
+}
+
+/// Overwrite unconditionally, with the marker.
+///
+/// Only reached once the caller has established that whatever was there is
+/// either ours or already preserved elsewhere. The marker is what stops this
+/// file becoming the next `CLAUDE.md`: a file bevel writes without one can
+/// never afterwards be told apart from a file the user wrote.
+fn replace(path: &Path, body: &str, cx: &Cx) -> Result<Action> {
+    std::fs::write(path, format!("{}\n\n{MARKER}\n", body.trim_end()))
+        .with_context(|| format!("cannot write {}", path.display()))?;
+    Ok(Action::Wrote(display(cx.project, cx.layers, path)))
 }
 
 /// Add the deny rule and, optionally, the hooks — without disturbing anything
@@ -523,11 +998,33 @@ fn is_ours(entry: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// The two-line stand-in left where the body used to be.
+///
+/// Claude Code loads `CLAUDE.md` every turn and opencode reads `AGENTS.md`
+/// first, so the body lives in the file both can reach and this one points at
+/// it. A pointer cannot drift from what it points at; a second copy can.
+const CLAUDE_MD_POINTER: &str = r#"See [AGENTS.md](AGENTS.md).
+
+One instruction lives in one place; this file is a pointer so the two
+cannot drift apart.
+"#;
+
+/// The body bevel wrote into `CLAUDE.md` before `AGENTS.md` existed.
+///
+/// Kept verbatim for one purpose: recognising an untouched generated file, so
+/// the migration can tell it apart from one a user edited. `write_if_absent`
+/// appended no marker, so a byte comparison is the only discriminator there
+/// has ever been. Do not tidy this text — editing it would reclassify every
+/// `CLAUDE.md` already on disk as hand-written.
+const GENERATED_CLAUDE_MD: &str = CLAUDE_MD;
+
 /// What this project needs said about itself. The pipeline is here rather than
 /// in the skills because it is the part a reader needs before invoking one.
 ///
 /// Loaded every turn, so it is kept under 50 lines and `bevel doctor` says so
 /// when it is not.
+const AGENTS_MD: &str = CLAUDE_MD;
+
 const CLAUDE_MD: &str = r#"# Agent notes
 
 Non-obvious things only. Anything derivable from the file tree does not belong
@@ -598,6 +1095,48 @@ pub fn method_sources(layers: &Layers, source: &Source) -> Vec<(String, PathBuf,
     out
 }
 
+/// Where each resource kind lands, per agent, for `doctor`.
+///
+/// This exists because of the one assumption holding up the whole opencode
+/// scope: that opencode reads `~/.claude/skills`. If that ever stops being
+/// true, nothing fails — sync reports success, the subagents land correctly,
+/// and the two skills that *are* the pipeline are simply invisible. Printing
+/// the resolved directory is what turns that from silent into obvious.
+pub fn destinations(layers: &Layers, agents: &[Agent]) -> Vec<(String, String, PathBuf)> {
+    let mut out = Vec::new();
+    for agent in agents {
+        let cx = Cx {
+            project: None,
+            layers,
+            source: &Source {
+                kind: crate::method::Kind::Local,
+                root: PathBuf::new(),
+                origin: String::new(),
+            },
+        };
+        let name = agent.as_str().to_string();
+        out.push((
+            name.clone(),
+            "skills".into(),
+            agent.skills().skills_dir(&cx),
+        ));
+        out.push((
+            name.clone(),
+            "subagents".into(),
+            agent.subagents().subagents_dir(&cx),
+        ));
+        out.push((
+            name,
+            "instructions".into(),
+            PathBuf::from(match agent {
+                Agent::Claude => "AGENTS.md + CLAUDE.md pointer",
+                Agent::Opencode => "AGENTS.md",
+            }),
+        ));
+    }
+    out
+}
+
 fn pick(label: String, user: PathBuf, tree: PathBuf) -> (String, PathBuf, &'static str) {
     if user.is_file() {
         (label, user, "user")
@@ -621,6 +1160,9 @@ mod tests {
             cache: tmp.path().join("cache"),
             // Never the real $HOME: these tests write into it.
             home: tmp.path().join("home"),
+            // Nor the real `~/.config/opencode`, for the same reason — this one
+            // holds agents a developer wrote themselves.
+            opencode: tmp.path().join("home/.config/opencode"),
         };
         // This repository is itself a method tree, which is what ships.
         let source = Source {
@@ -634,7 +1176,7 @@ mod tests {
     #[test]
     fn a_full_sync_writes_everything_once_and_is_idempotent() {
         let (_t, p, l, m) = setup();
-        let first = sync(Some(&p), &l, &m, false).unwrap();
+        let first = sync(Some(&p), &l, &m, &[Agent::Claude], false).unwrap();
         assert!(
             first.iter().all(|a| matches!(a, Action::Wrote(_))),
             "{first:?}"
@@ -646,7 +1188,7 @@ mod tests {
         let text = std::fs::read_to_string(&skill).unwrap();
         assert!(text.starts_with("---\nname: shape"));
 
-        let second = sync(Some(&p), &l, &m, false).unwrap();
+        let second = sync(Some(&p), &l, &m, &[Agent::Claude], false).unwrap();
         assert!(
             second.iter().all(|a| matches!(a, Action::Skipped(_, _))),
             "{second:?}"
@@ -659,7 +1201,7 @@ mod tests {
     #[test]
     fn the_method_installs_where_claude_code_reads_it() {
         let (_t, p, l, m) = setup();
-        sync(Some(&p), &l, &m, true).unwrap();
+        sync(Some(&p), &l, &m, &[Agent::Claude], true).unwrap();
         assert!(l.home.join(".claude/skills/implement/SKILL.md").is_file());
         assert!(l.home.join(".claude/agents/domain-scout.md").is_file());
         // Nothing per-project, and nothing in the directory the standard
@@ -678,7 +1220,7 @@ mod tests {
     #[test]
     fn the_method_installs_with_no_project_at_all() {
         let (_t, _p, l, m) = setup();
-        let actions = sync(None, &l, &m, true).unwrap();
+        let actions = sync(None, &l, &m, &[Agent::Claude], true).unwrap();
         assert!(l.claude_skills().join("shape/SKILL.md").is_file());
         assert!(l.claude_agents().join("spec-critic.md").is_file());
         // Every path reported has to be one the user can find without a root
@@ -694,36 +1236,42 @@ mod tests {
     #[test]
     fn without_a_project_nothing_project_scoped_is_written() {
         let (t, _p, l, m) = setup();
-        sync(None, &l, &m, true).unwrap();
+        sync(None, &l, &m, &[Agent::Claude], true).unwrap();
         for stray in ["CLAUDE.md", ".claude/settings.json"] {
             assert!(!l.home.join(stray).exists(), "{stray} in $HOME");
             assert!(!t.path().join(stray).exists(), "{stray} outside a project");
         }
     }
 
-    /// CLAUDE.md is loaded every turn, so it carries the pipeline itself and
-    /// pays for it in a budget `bevel doctor` enforces.
+    /// AGENTS.md is loaded every turn by both agents, so it carries the
+    /// pipeline itself and pays for it in a budget `bevel doctor` enforces.
     #[test]
-    fn claude_md_carries_the_runnable_pipeline_and_stays_in_budget() {
+    fn agents_md_carries_the_runnable_pipeline_and_stays_in_budget() {
         let (_t, p, l, m) = setup();
-        sync(Some(&p), &l, &m, false).unwrap();
-        let text = std::fs::read_to_string(p.root.join("CLAUDE.md")).unwrap();
+        sync(Some(&p), &l, &m, &[Agent::Claude], false).unwrap();
+        let text = std::fs::read_to_string(p.root.join("AGENTS.md")).unwrap();
         assert!(text.contains("bevel gate <id>"));
         assert!(text.contains("bevel method shape"));
         // The reason approve is absent has to be stated, or an agent will try.
         assert!(text.contains("requires a terminal"));
         assert!(text.lines().count() <= 50, "{} lines", text.lines().count());
+
+        // And the pointer stays a pointer: if the body were duplicated here the
+        // two would be free to drift, which is what the move was for.
+        let claude = std::fs::read_to_string(p.root.join("CLAUDE.md")).unwrap();
+        assert!(claude.contains("AGENTS.md"));
+        assert!(!claude.contains("bevel gate <id>"));
     }
 
     #[test]
     fn hooks_are_installed_only_when_asked_and_never_duplicate() {
         let (_t, p, l, m) = setup();
-        sync(Some(&p), &l, &m, false).unwrap();
+        sync(Some(&p), &l, &m, &[Agent::Claude], false).unwrap();
         let path = p.root.join(".claude/settings.json");
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(v.get("hooks").is_none());
 
-        sync(Some(&p), &l, &m, true).unwrap();
+        sync(Some(&p), &l, &m, &[Agent::Claude], true).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let post = v["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(post.len(), 1);
@@ -735,7 +1283,7 @@ mod tests {
         );
 
         // Running twice must not stack duplicates.
-        sync(Some(&p), &l, &m, true).unwrap();
+        sync(Some(&p), &l, &m, &[Agent::Claude], true).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["hooks"]["PostToolUse"].as_array().unwrap().len(), 1);
     }
@@ -753,7 +1301,7 @@ mod tests {
         )
         .unwrap();
 
-        sync(Some(&p), &l, &m, true).unwrap();
+        sync(Some(&p), &l, &m, &[Agent::Claude], true).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
 
         let deny = v["permissions"]["deny"].as_array().unwrap();
@@ -776,7 +1324,7 @@ mod tests {
         )
         .unwrap();
 
-        sync(Some(&p), &l, &m, true).unwrap();
+        sync(Some(&p), &l, &m, &[Agent::Claude], true).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let stop = v["hooks"]["Stop"].as_array().unwrap();
         assert_eq!(stop.len(), 2);
@@ -796,7 +1344,9 @@ mod tests {
             root: _t.path().join("nowhere"),
             origin: "test".into(),
         };
-        let err = sync(Some(&p), &l, &empty, false).unwrap_err().to_string();
+        let err = sync(Some(&p), &l, &empty, &[Agent::Claude], false)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("not available"), "{err}");
     }
 
@@ -825,7 +1375,7 @@ mod tests {
     #[test]
     fn a_multi_file_skill_installs_its_whole_tree() {
         let (_t, _p, l, m) = setup();
-        sync(None, &l, &m, false).unwrap();
+        sync(None, &l, &m, &[Agent::Claude], false).unwrap();
 
         let dir = l.claude_skills().join("skill-creator");
         for rel in [
@@ -860,7 +1410,7 @@ mod tests {
     #[test]
     fn a_file_a_skill_no_longer_ships_is_removed() {
         let (_t, _p, l, m) = setup();
-        sync(None, &l, &m, false).unwrap();
+        sync(None, &l, &m, &[Agent::Claude], false).unwrap();
 
         let dir = l.claude_skills().join("skill-creator");
         let stale = dir.join("scripts/dropped_upstream.py");
@@ -869,7 +1419,7 @@ mod tests {
         std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
         std::fs::write(&nested, "gone\n").unwrap();
 
-        let actions = sync(None, &l, &m, false).unwrap();
+        let actions = sync(None, &l, &m, &[Agent::Claude], false).unwrap();
         assert!(!stale.exists());
         assert!(!nested.exists());
         assert!(!dir.join("old").exists(), "emptied directories go too");
@@ -894,7 +1444,7 @@ mod tests {
         std::fs::create_dir_all(deep.parent().unwrap()).unwrap();
         std::fs::write(&deep, "mine\n").unwrap();
 
-        sync(None, &l, &m, false).unwrap();
+        sync(None, &l, &m, &[Agent::Claude], false).unwrap();
         assert!(mine.is_file(), "a personal skill was pruned");
         assert!(deep.is_file(), "a personal skill was pruned");
     }
@@ -903,14 +1453,14 @@ mod tests {
     #[test]
     fn a_bytecode_cache_the_skill_created_survives() {
         let (_t, _p, l, m) = setup();
-        sync(None, &l, &m, false).unwrap();
+        sync(None, &l, &m, &[Agent::Claude], false).unwrap();
         let cache = l
             .claude_skills()
             .join("skill-creator/scripts/__pycache__/utils.cpython-312.pyc");
         std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
         std::fs::write(&cache, "bytecode").unwrap();
 
-        sync(None, &l, &m, false).unwrap();
+        sync(None, &l, &m, &[Agent::Claude], false).unwrap();
         assert!(cache.is_file());
     }
 
@@ -919,7 +1469,7 @@ mod tests {
     #[test]
     fn a_single_file_skill_still_installs_as_one_file() {
         let (_t, _p, l, m) = setup();
-        sync(None, &l, &m, false).unwrap();
+        sync(None, &l, &m, &[Agent::Claude], false).unwrap();
         let dir = l.claude_skills().join("shape");
         let files: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
@@ -936,10 +1486,372 @@ mod tests {
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
         std::fs::write(&dest, "---\nname: shape\n---\nmine\n").unwrap();
 
-        sync(Some(&p), &l, &m, false).unwrap();
+        sync(Some(&p), &l, &m, &[Agent::Claude], false).unwrap();
         assert_eq!(
             std::fs::read_to_string(&dest).unwrap(),
             "---\nname: shape\n---\nmine\n"
         );
+    }
+
+    // ------------------------------------------------ acceptance, spec 0001
+
+    /// The failure mode with no symptom: a file installed where nothing reads
+    /// it looks exactly like a file installed correctly. opencode scans
+    /// `~/.config/opencode/agents/<name>.md` — plural, and with no
+    /// `.claude/agents` fallback — so all seven definitions must land there,
+    /// named for the agent.
+    #[test]
+    fn opencode_subagents_land_where_opencode_reads_them() {
+        let (_t, p, l, m) = setup();
+        sync(Some(&p), &l, &m, &[Agent::Opencode], false).unwrap();
+
+        for name in AGENT_DEFS {
+            let dest = l.opencode_agents().join(format!("{name}.md"));
+            assert!(dest.is_file(), "{name} was not installed for opencode");
+        }
+        // Plural, and never Claude Code's directory: opencode has no
+        // `.claude/agents` fallback, so a file there is a file it never reads.
+        assert!(l.home.join(".config/opencode/agents").is_dir());
+        assert!(!l.home.join(".config/opencode/agent").exists());
+        assert!(!l.claude_agents().exists());
+    }
+
+    /// The property the subagents exist for, and it is not "read-only": the
+    /// seven carry four different tool sets. `mockup-builder` writes and does
+    /// not search; `context-packer` writes and fetches. A subagent must come
+    /// out the far side with the tools it declared and nothing more — the
+    /// `permissions` allow-list closed by a terminal deny, so a tool nobody
+    /// granted cannot appear.
+    #[test]
+    fn a_subagents_tool_set_survives_translation_into_opencode_permissions() {
+        let (_t, p, l, m) = setup();
+        sync(Some(&p), &l, &m, &[Agent::Opencode], false).unwrap();
+
+        let read = |name: &str| {
+            let text =
+                std::fs::read_to_string(l.opencode_agents().join(format!("{name}.md"))).unwrap();
+            let (yaml, _) = crate::spec::split_frontmatter(&text).unwrap();
+            serde_yaml::from_str::<serde_yaml::Value>(yaml).unwrap()
+        };
+        let actions = |v: &serde_yaml::Value, effect: &str| -> Vec<String> {
+            v["permissions"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .filter(|p| p["effect"].as_str() == Some(effect))
+                .map(|p| p["action"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        // A searcher that may shell out, and must not write.
+        let scout = read("domain-scout");
+        assert_eq!(scout["mode"].as_str(), Some("subagent"));
+        assert_eq!(actions(&scout, "allow"), ["read", "grep", "glob", "bash"]);
+
+        // The two that legitimately write would be corrupted by a blanket
+        // "read-only" translation, which is why this is not that.
+        let mockup = read("mockup-builder");
+        assert_eq!(actions(&mockup, "allow"), ["read", "edit"]);
+        let packer = read("context-packer");
+        assert!(actions(&packer, "allow").contains(&"webfetch".to_string()));
+
+        // Closed by a terminal deny, and last, because opencode resolves by
+        // last match: a tool nobody granted must be impossible, not merely
+        // unmentioned.
+        for v in [&scout, &mockup, &packer] {
+            let perms = v["permissions"].as_sequence().unwrap();
+            let last = perms.last().unwrap();
+            assert_eq!(last["action"].as_str(), Some("*"));
+            assert_eq!(last["effect"].as_str(), Some("deny"));
+            assert_eq!(actions(v, "deny"), ["*"]);
+        }
+
+        // The version the permissions shape belongs to, stated in the file.
+        let text = std::fs::read_to_string(l.opencode_agents().join("domain-scout.md")).unwrap();
+        assert!(text.contains("requires opencode v2 or newer"));
+
+        // An unrecognised tool must stop the run rather than quietly narrow a
+        // subagent to the tools we happened to recognise.
+        assert!(permissions_for(Some("Read, Telepathy")).is_err());
+
+        // And an omitted `tools:` means "inherit everything" where these files
+        // come from, so a closed allow-list would strip the subagent of every
+        // capability — the same silent narrowing, arrived at by doing nothing.
+        assert!(permissions_for(None).unwrap().is_none());
+    }
+
+    /// `model: opus` and `model: fable` are Claude Code shorthands. opencode
+    /// wants `provider/model-id` and would fail to resolve a model literally
+    /// called "opus", so the field is dropped rather than transliterated —
+    /// letting opencode apply its own default instead of a broken pin.
+    #[test]
+    fn the_claude_only_model_shorthand_is_dropped_rather_than_translated() {
+        let (_t, p, l, m) = setup();
+        sync(Some(&p), &l, &m, &[Agent::Opencode], false).unwrap();
+
+        // The method files really do carry the shorthands, or this proves
+        // nothing at all.
+        let source =
+            std::fs::read_to_string(m.method_dir().join("agents/domain-scout.md")).unwrap();
+        assert!(source.contains("model: fable"));
+
+        for name in AGENT_DEFS {
+            let text =
+                std::fs::read_to_string(l.opencode_agents().join(format!("{name}.md"))).unwrap();
+            let (yaml, _) = crate::spec::split_frontmatter(&text).unwrap();
+            let front: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+            assert!(
+                front["model"].is_null(),
+                "{name} carried a model into opencode"
+            );
+            // `name` goes too: opencode takes the id from the filename, and a
+            // stale one here would disagree with the file it sits in.
+            assert!(front["name"].is_null(), "{name} carried a redundant name");
+            assert!(
+                !front["description"].is_null(),
+                "{name} lost its description"
+            );
+        }
+    }
+
+    /// One instruction in one place. The body moves to the file both agents
+    /// read first, and the Claude-named file becomes a pointer rather than a
+    /// second copy free to drift.
+    #[test]
+    fn the_project_body_lives_in_agents_md_with_claude_md_pointing_at_it() {
+        let (_t, p, l, m) = setup();
+        sync(Some(&p), &l, &m, &[Agent::Claude, Agent::Opencode], false).unwrap();
+
+        let agents = std::fs::read_to_string(p.root.join("AGENTS.md")).unwrap();
+        let claude = std::fs::read_to_string(p.root.join("CLAUDE.md")).unwrap();
+
+        assert!(agents.contains("bevel gate <id>"));
+        // A pointer, not a copy. If the body appeared in both, the two would be
+        // free to disagree — which is the whole reason for the indirection.
+        assert!(claude.contains("[AGENTS.md](AGENTS.md)"));
+        assert!(!claude.contains("bevel gate <id>"));
+        assert!(claude.lines().count() < 10, "the pointer grew a body");
+
+        // opencode alone needs no CLAUDE.md at all: it reads AGENTS.md first.
+        let (_t2, p2, l2, m2) = setup();
+        sync(Some(&p2), &l2, &m2, &[Agent::Opencode], false).unwrap();
+        assert!(p2.root.join("AGENTS.md").is_file());
+        assert!(!p2.root.join("CLAUDE.md").exists());
+    }
+
+    /// The migration's sharp edge, and the only place bevel moves content a
+    /// user wrote. A `CLAUDE.md` byte-identical to `CLAUDE_MD` is generated and
+    /// may be replaced; anything else is moved whole to `AGENTS.md` with a
+    /// pointer left behind — never truncated, never overwritten onto an
+    /// existing `AGENTS.md`, and reported as a move.
+    #[test]
+    fn a_hand_edited_claude_md_is_moved_whole_and_never_silently_discarded() {
+        let (_t, p, l, m) = setup();
+        let mine = "# My notes\n\nDeploy with `make ship`. Never force-push main.\n";
+        std::fs::write(p.root.join("CLAUDE.md"), mine).unwrap();
+
+        let actions = sync(Some(&p), &l, &m, &[Agent::Claude], false).unwrap();
+
+        // Every byte survives, in the file both agents now read.
+        assert_eq!(
+            std::fs::read_to_string(p.root.join("AGENTS.md")).unwrap(),
+            mine
+        );
+        // Reported as a move, because bevel did not author this content and
+        // "wrote AGENTS.md" would claim that it had.
+        assert!(
+            actions.iter().any(|a| matches!(a, Action::Moved(from, to)
+                    if from.ends_with("CLAUDE.md") && to.ends_with("AGENTS.md"))),
+            "{actions:?}"
+        );
+        // And the file Claude Code loads still leads somewhere.
+        assert!(std::fs::read_to_string(p.root.join("CLAUDE.md"))
+            .unwrap()
+            .contains("AGENTS.md"));
+
+        // Re-running must not move it a second time, nor overwrite what is now
+        // the user's AGENTS.md with the generated body.
+        let again = sync(Some(&p), &l, &m, &[Agent::Claude], false).unwrap();
+        assert!(!again.iter().any(|a| matches!(a, Action::Moved(_, _))));
+        assert_eq!(
+            std::fs::read_to_string(p.root.join("AGENTS.md")).unwrap(),
+            mine
+        );
+
+        // An AGENTS.md that is already theirs is never overwritten to make room
+        // for a migration: the whole resource steps aside instead.
+        let (_t2, p2, l2, m2) = setup();
+        std::fs::write(p2.root.join("AGENTS.md"), "theirs\n").unwrap();
+        std::fs::write(p2.root.join("CLAUDE.md"), mine).unwrap();
+        sync(Some(&p2), &l2, &m2, &[Agent::Claude], false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p2.root.join("AGENTS.md")).unwrap(),
+            "theirs\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(p2.root.join("CLAUDE.md")).unwrap(),
+            mine
+        );
+
+        // A generated CLAUDE.md, by contrast, is ours to replace.
+        let (_t3, p3, l3, m3) = setup();
+        std::fs::write(p3.root.join("CLAUDE.md"), GENERATED_CLAUDE_MD).unwrap();
+        let acts = sync(Some(&p3), &l3, &m3, &[Agent::Claude], false).unwrap();
+        assert!(!acts.iter().any(|a| matches!(a, Action::Moved(_, _))));
+        assert!(std::fs::read_to_string(p3.root.join("AGENTS.md"))
+            .unwrap()
+            .contains(MARKER));
+        assert!(std::fs::read_to_string(p3.root.join("CLAUDE.md"))
+            .unwrap()
+            .contains("[AGENTS.md](AGENTS.md)"));
+
+        // Bytes we cannot decode are still bytes someone wrote. Classifying a
+        // failed read as "absent" would overwrite them, and the loss would be
+        // total and silent — the one failure mode with no symptom at all.
+        let (_t4, p4, l4, m4) = setup();
+        let latin1 = b"# nai\xefve notes\n";
+        std::fs::write(p4.root.join("CLAUDE.md"), latin1).unwrap();
+        sync(Some(&p4), &l4, &m4, &[Agent::Claude], false).unwrap();
+        assert_eq!(std::fs::read(p4.root.join("CLAUDE.md")).unwrap(), latin1);
+
+        let (_t5, p5, l5, m5) = setup();
+        std::fs::write(p5.root.join("AGENTS.md"), latin1).unwrap();
+        std::fs::write(p5.root.join("CLAUDE.md"), mine).unwrap();
+        sync(Some(&p5), &l5, &m5, &[Agent::Claude], false).unwrap();
+        assert_eq!(std::fs::read(p5.root.join("AGENTS.md")).unwrap(), latin1);
+
+        // AGENTS.md is seeded once and never rewritten: its whole purpose is
+        // the gotchas a user writes into it, and the marker identifies our seed
+        // rather than licensing us to replace what grew from it.
+        let (_t6, p6, l6, m6) = setup();
+        sync(Some(&p6), &l6, &m6, &[Agent::Claude], false).unwrap();
+        let grown = std::fs::read_to_string(p6.root.join("AGENTS.md"))
+            .unwrap()
+            .replace(
+                "<!-- Conventions",
+                "Never force-push main.\n\n<!-- Conventions",
+            );
+        std::fs::write(p6.root.join("AGENTS.md"), &grown).unwrap();
+        sync(Some(&p6), &l6, &m6, &[Agent::Claude], false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p6.root.join("AGENTS.md")).unwrap(),
+            grown,
+            "a user's gotchas were reset by the next sync"
+        );
+    }
+
+    /// A `CLAUDE.md` symlinked at `AGENTS.md` is the pointer this design
+    /// describes, expressed the other way. Writing through it would replace the
+    /// body with a pointer to itself — and then restore and destroy it on
+    /// alternate runs.
+    #[test]
+    #[cfg(unix)]
+    fn the_pointer_is_never_written_through_a_symlink() {
+        let (_t, p, l, m) = setup();
+        sync(Some(&p), &l, &m, &[Agent::Claude], false).unwrap();
+        let body = std::fs::read_to_string(p.root.join("AGENTS.md")).unwrap();
+
+        std::fs::remove_file(p.root.join("CLAUDE.md")).unwrap();
+        std::os::unix::fs::symlink("AGENTS.md", p.root.join("CLAUDE.md")).unwrap();
+
+        sync(Some(&p), &l, &m, &[Agent::Claude], false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.root.join("AGENTS.md")).unwrap(),
+            body,
+            "the body was written through the symlink"
+        );
+    }
+
+    /// Detection and parsing are the two behaviours every other test bypasses
+    /// by passing its agents explicitly.
+    #[test]
+    fn agents_are_detected_additively_and_an_unknown_name_is_refused() {
+        let (_t, _p, l, _m) = setup();
+        // Nothing installed yet: rendering for nobody would be a silent no-op
+        // on a fresh machine, so Claude Code is the floor.
+        assert_eq!(detect(&l), vec![Agent::Claude]);
+
+        std::fs::create_dir_all(l.opencode_home()).unwrap();
+        assert_eq!(detect(&l), vec![Agent::Opencode]);
+        std::fs::create_dir_all(l.claude_home()).unwrap();
+        assert_eq!(detect(&l), vec![Agent::Claude, Agent::Opencode]);
+
+        assert_eq!(Agent::parse("opencode").unwrap(), Agent::Opencode);
+        assert_eq!(Agent::parse(" Claude ").unwrap(), Agent::Claude);
+        // The mistake the deleted code made: accepting a name and rendering
+        // nothing for it, which reads exactly like success.
+        let err = Agent::parse("cursor").unwrap_err().to_string();
+        assert!(err.contains("unknown agent"), "{err}");
+        assert!(err.contains("claude, opencode"), "{err}");
+    }
+
+    /// `~/.config/opencode` holds agents the user wrote themselves, exactly as
+    /// `~/.claude/skills` does. The prune must stay inside what this sync
+    /// installed and must never cross from one agent's tree into another's.
+    #[test]
+    fn pruning_for_one_agent_never_reaches_another_agents_directory() {
+        let (_t, p, l, m) = setup();
+
+        // Agents the user wrote themselves, in both trees.
+        let theirs_oc = l.opencode_agents().join("my-reviewer.md");
+        std::fs::create_dir_all(theirs_oc.parent().unwrap()).unwrap();
+        std::fs::write(&theirs_oc, "---\ndescription: mine\n---\nmine\n").unwrap();
+        let theirs_cc = l.claude_agents().join("my-reviewer.md");
+        std::fs::create_dir_all(theirs_cc.parent().unwrap()).unwrap();
+        std::fs::write(&theirs_cc, "---\nname: mine\n---\nmine\n").unwrap();
+
+        sync(Some(&p), &l, &m, &[Agent::Claude, Agent::Opencode], false).unwrap();
+        assert!(theirs_oc.is_file(), "a personal opencode agent was pruned");
+        assert!(theirs_cc.is_file(), "a personal Claude agent was pruned");
+
+        // Rendering for one agent must not reach into the other's tree, in
+        // either direction.
+        let (_t2, p2, l2, m2) = setup();
+        sync(Some(&p2), &l2, &m2, &[Agent::Opencode], false).unwrap();
+        assert!(!l2.claude_agents().exists());
+        let (_t3, p3, l3, m3) = setup();
+        sync(Some(&p3), &l3, &m3, &[Agent::Claude], false).unwrap();
+        assert!(!l3.opencode_home().exists());
+    }
+
+    /// Idempotence, across two renderers — asserting the *reason*, not just the
+    /// absence of writes. "Nothing changed" is also what a sync reports when it
+    /// skips everything as hand-edited, which is the migration bug this spec
+    /// exists to fix; only `unchanged` distinguishes success from that failure.
+    #[test]
+    fn a_second_sync_for_both_agents_skips_everything_as_unchanged() {
+        let (_t, p, l, m) = setup();
+        let both = [Agent::Claude, Agent::Opencode];
+
+        let first = sync(Some(&p), &l, &m, &both, true).unwrap();
+        assert!(first.iter().any(|a| matches!(a, Action::Wrote(_))));
+
+        let second = sync(Some(&p), &l, &m, &both, true).unwrap();
+        // The reason matters more than the absence of writes. "Nothing changed"
+        // is also what a sync reports when it skips everything as hand-edited,
+        // which is the migration bug this criterion exists to catch — so a
+        // green here must mean the files match, not that they were untouchable.
+        for action in &second {
+            match action {
+                Action::Skipped(path, why) => assert!(
+                    *why == "unchanged" || *why == "up to date",
+                    "{path} skipped as {why}"
+                ),
+                other => panic!("second sync was not idempotent: {other:?}"),
+            }
+        }
+
+        // Skills are installed once, not once per agent: both name the same
+        // directory, and doing the work twice would report a false change.
+        let shape = l.claude_skills().join("shape/SKILL.md");
+        assert_eq!(
+            second
+                .iter()
+                .filter(|a| matches!(a, Action::Skipped(p, _) if p.ends_with("shape/SKILL.md")))
+                .count(),
+            1,
+            "the shared skills directory was visited twice"
+        );
+        assert!(shape.is_file());
     }
 }

@@ -4,7 +4,7 @@
 //! machines needs no ignore rules: `~/.config` travels, `~/.cache` does not.
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct Layers {
     /// User layer: config and hand-written packs. Small, syncable.
@@ -14,6 +14,11 @@ pub struct Layers {
     /// The user's home. `~/.claude` hangs off this one: the method is the same
     /// text in every project, so it installs once per machine.
     pub home: PathBuf,
+    /// Another tool's directory, resolved by that tool's rules rather than
+    /// ours. Stored rather than computed so it stays deterministic in tests:
+    /// environment variables are process-global, and reading them from a getter
+    /// would make every test that touches this race the others.
+    pub opencode: PathBuf,
 }
 
 impl Layers {
@@ -24,11 +29,13 @@ impl Layers {
         // who prefers a single location over the XDG split. It deliberately
         // leaves `~/.claude` alone: that one is Claude Code's, not bevel's, and
         // moving it would hide the skills from the only thing that reads them.
+        let opencode = opencode_dir(&home);
         if let Some(root) = env_path("BEVEL_HOME") {
             return Ok(Self {
                 config: root.join("config"),
                 cache: root.join("cache"),
                 home,
+                opencode,
             });
         }
         // `~/.config` and `~/.cache` on every platform, Windows included, rather
@@ -43,6 +50,7 @@ impl Layers {
             config: config.join("bevel"),
             cache: cache.join("bevel"),
             home,
+            opencode,
         })
     }
 
@@ -63,6 +71,24 @@ impl Layers {
 
     pub fn claude_agents(&self) -> PathBuf {
         self.claude_home().join("agents")
+    }
+
+    /// Where opencode keeps its global configuration.
+    ///
+    /// Resolved once in `resolve` rather than derived from `home` here, because
+    /// opencode honours `XDG_CONFIG_HOME` and `OPENCODE_CONFIG_DIR`. Hardcoding
+    /// `~/.config/opencode` would, for anyone who sets either, write to a
+    /// directory opencode never reads — and that failure looks exactly like
+    /// success, which is the trap `claude_home` already names.
+    pub fn opencode_home(&self) -> PathBuf {
+        self.opencode.clone()
+    }
+
+    /// Plural. opencode accepts the singular for backwards compatibility and
+    /// documents the plural, and a file written where nothing reads it is
+    /// indistinguishable from one written correctly — see `claude_home`.
+    pub fn opencode_agents(&self) -> PathBuf {
+        self.opencode_home().join("agents")
     }
 
     pub fn user_packs(&self) -> PathBuf {
@@ -111,6 +137,20 @@ fn home_dir() -> Option<PathBuf> {
     env_path(HOME_VAR)
 }
 
+/// opencode's own resolution order, followed rather than approximated:
+/// `OPENCODE_CONFIG_DIR`, then `XDG_CONFIG_HOME/opencode`, then
+/// `~/.config/opencode`. `BEVEL_HOME` is deliberately not consulted — it moves
+/// bevel's layers, and moving another tool's configuration with them would
+/// hide opencode's files from opencode.
+fn opencode_dir(home: &Path) -> PathBuf {
+    if let Some(dir) = env_path("OPENCODE_CONFIG_DIR") {
+        return dir;
+    }
+    env_path("XDG_CONFIG_HOME")
+        .unwrap_or_else(|| home.join(".config"))
+        .join("opencode")
+}
+
 fn env_path(key: &str) -> Option<PathBuf> {
     env_os(key).map(PathBuf::from)
 }
@@ -132,12 +172,17 @@ mod tests {
             (HOME_VAR, Some("/home/someone")),
             ("XDG_CONFIG_HOME", None),
             ("XDG_CACHE_HOME", None),
+            ("OPENCODE_CONFIG_DIR", None),
         ]);
         let l = Layers::resolve().unwrap();
         assert_eq!(l.config, PathBuf::from("/tmp/hh/config"));
         assert_eq!(l.cache, PathBuf::from("/tmp/hh/cache"));
-        // Collapsing the bevel layers must not drag the agent's own along.
+        // Collapsing the bevel layers must not drag either agent's own along.
         assert_eq!(l.claude_home(), PathBuf::from("/home/someone/.claude"));
+        assert_eq!(
+            l.opencode_home(),
+            PathBuf::from("/home/someone/.config/opencode")
+        );
 
         let _guard2 = EnvGuard::set(&[("BEVEL_HOME", None)]);
         let l = Layers::resolve().unwrap();
@@ -151,6 +196,25 @@ mod tests {
             l.claude_agents(),
             PathBuf::from("/home/someone/.claude/agents")
         );
+        // Plural: opencode documents the plural and keeps the singular only for
+        // backwards compatibility.
+        assert_eq!(
+            l.opencode_agents(),
+            PathBuf::from("/home/someone/.config/opencode/agents")
+        );
+
+        // opencode honours both of these, so bevel has to as well — writing to
+        // `~/.config/opencode` when the user redirected it is the failure that
+        // looks identical to success.
+        let _x = EnvGuard::set(&[("XDG_CONFIG_HOME", Some("/custom/cfg"))]);
+        let l = Layers::resolve().unwrap();
+        assert_eq!(l.opencode_home(), PathBuf::from("/custom/cfg/opencode"));
+        // bevel's own layer still tracks XDG too; the two are independent.
+        assert_eq!(l.config, PathBuf::from("/custom/cfg/bevel"));
+
+        let _o = EnvGuard::set(&[("OPENCODE_CONFIG_DIR", Some("/elsewhere/oc"))]);
+        let l = Layers::resolve().unwrap();
+        assert_eq!(l.opencode_home(), PathBuf::from("/elsewhere/oc"));
 
         // The reported bug was `HOME is not set` from a shell with no reason to
         // set it. Windows must resolve without it, and must ignore it when an

@@ -139,16 +139,20 @@ fn measure_tracked(
 pub fn audit(project: &Project, layers: &Layers, source: &method::Source) -> Result<Audit> {
     let mut items = Vec::new();
 
-    // Loaded every turn, and now the only file that is: the pipeline notes
-    // live in CLAUDE.md itself rather than behind a pointer.
-    if let Some(i) = measure_tracked(
-        "CLAUDE.md",
-        &project.root.join("CLAUDE.md"),
-        50,
-        Load::Always,
-        &project.root,
-    ) {
-        items.push(i);
+    // Both are loaded every turn — AGENTS.md carries the pipeline notes and
+    // CLAUDE.md points at it — so both are measured. Measuring only the pointer
+    // would retire this check silently the moment the body moved, which is the
+    // failure this pair of entries exists to prevent (DESIGN.md §13).
+    for name in ["AGENTS.md", "CLAUDE.md"] {
+        if let Some(i) = measure_tracked(
+            name,
+            &project.root.join(name),
+            50,
+            Load::Always,
+            &project.root,
+        ) {
+            items.push(i);
+        }
     }
     for pkg in &project.config.packages {
         let path = project.root.join(&pkg.path).join("AGENTS.md");
@@ -488,6 +492,7 @@ mod tests {
             config: tmp.path().join("cfg"),
             cache: tmp.path().join("cache"),
             home: tmp.path().join("home"),
+            opencode: tmp.path().join("home/.config/opencode"),
         };
         // The repository's own method tree, which is what ships.
         let source = method::Source {
@@ -678,5 +683,39 @@ mod tests {
         let shape = a.items.iter().find(|i| i.name == "skill/shape").unwrap();
         assert_eq!(shape.lines, 200);
         assert!(shape.over());
+    }
+
+    // ------------------------------------------------ acceptance, spec 0001
+
+    /// `audit` hardcoded `CLAUDE.md` as the only `Load::Always` item, and the
+    /// loop below it walks packages only — so a root `AGENTS.md` went
+    /// unaudited. Move the body without moving the measurement and DESIGN.md
+    /// §13's budget check retires itself while every other test still passes.
+    #[test]
+    fn the_always_loaded_context_budget_follows_the_body_to_agents_md() {
+        let (_t, p, l, m) = setup();
+        let bloat: String = (0..80).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(p.root.join("AGENTS.md"), &bloat).unwrap();
+
+        let a = audit(&p, &l, &m).unwrap();
+        let item = a
+            .items
+            .iter()
+            .find(|i| i.name == "AGENTS.md")
+            .expect("the root AGENTS.md is not measured at all");
+        // Always-loaded, or the budget is measuring something that costs
+        // nothing per turn.
+        assert_eq!(item.load, Load::Always);
+        assert_eq!(item.limit, 50);
+        assert!(item.over(), "80 lines went unflagged");
+        assert!(a.items.iter().any(|i| i.name == "AGENTS.md" && i.over()));
+
+        // The pointer is loaded every turn too, so it stays measured — the
+        // point is that the *body* cannot escape the budget by moving.
+        std::fs::write(p.root.join("CLAUDE.md"), "See AGENTS.md.\n").unwrap();
+        let a = audit(&p, &l, &m).unwrap();
+        let pointer = a.items.iter().find(|i| i.name == "CLAUDE.md").unwrap();
+        assert_eq!(pointer.load, Load::Always);
+        assert!(!pointer.over());
     }
 }
