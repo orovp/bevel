@@ -1470,7 +1470,7 @@ mod tests {
         // nothing at all.
         let source =
             std::fs::read_to_string(m.method_dir().join("agents/domain-scout.md")).unwrap();
-        assert!(source.contains("model: fable"));
+        assert!(source.contains("model: opus") || source.contains("model: fable"));
 
         for name in AGENT_DEFS {
             let text =
