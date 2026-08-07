@@ -50,8 +50,11 @@ private readonly baseUrl = `${inject(API_BASE_URL)}/{entity_plural}`;
 | Generated file | Produced by |
 | --- | --- |
 | `core/api-types.generated.ts` | `openapi-typescript` over the generated schema |
-| `features/{entity}/{entity}.model.ts` | `cargo xtask gen-ts` — one shim per entity |
-| `core/search/search.model.ts` | `cargo xtask gen-ts` — the result union and its arms |
+| `features/{entity}/{entity}.model.ts` | the model generator — one shim per entity |
+| `core/search/search.model.ts` | the model generator — the result union and its arms |
+
+The generator is one task-runner entry point (`npm run gen:ts` or whatever the
+repo spells it), never a command typed by hand.
 
 **To change a field, change the backend DTO**, then regenerate. TypeScript stops
 compiling at every call site that has to change — that is the mechanism, not an
