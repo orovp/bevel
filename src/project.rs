@@ -258,11 +258,14 @@ pub fn init(root: &Path, monorepo: bool) -> Result<PathBuf> {
 const INBOX_TEMPLATE: &str = "\
 # Inbox
 
-Raw ideas, one per line. Capture is supposed to be cheap — do not try to be
+Raw ideas, one per row. Capture is supposed to be cheap — do not try to be
 precise here, that is what shaping is for.
 
-Add with `bevel inbox add \"...\"`, shape with `bevel shape <n>`.
+Add with `bevel inbox add \"...\"`, shape with `bevel shape <n>`. The ID is
+the number `shape` takes; it is rewritten from position, so do not curate it.
 
+| ID | Raw idea |
+| --- | --- |
 ";
 
 #[cfg(test)]

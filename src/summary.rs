@@ -221,7 +221,7 @@ mod tests {
         )
         .unwrap();
         // Names long enough to mean something: a criterion called `one` is
-        // found in INBOX.md's own "one per line", which is a substring match
+        // found in INBOX.md's own "one per row", which is a substring match
         // working as documented and a fixture that was never realistic.
         std::fs::write(
             dir.join("acceptance.rs"),
